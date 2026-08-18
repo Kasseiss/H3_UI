@@ -1,0 +1,35 @@
+[Unit]
+Description=H3 Studio web and ComfyUI bridge
+After=network-online.target comfyui.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=h3studio
+Group=h3studio
+WorkingDirectory=/opt/h3-studio
+Environment=NODE_ENV=production
+Environment=H3_HOST=127.0.0.1
+Environment=H3_PORT=3100
+Environment=COMFYUI_URL=http://127.0.0.1:8188
+Environment=COMFYUI_SERVICE_NAME=comfyui.service
+Environment=COMFYUI_SERVICE_SCOPE=system
+Environment=H3_ALLOW_SERVICE_CONTROL=1
+Environment=H3_SERVICE_CONTROL_USE_SUDO=1
+Environment=H3_STORAGE_ROOT=/data/h3-studio
+Environment=H3_DATA_ROOT=/var/lib/h3-studio
+Environment=H3_LOG_ROOT=/var/log/h3-studio
+Environment=H3_WORKFLOW_PATH=/opt/h3-studio/workflows/h3-api.json
+ExecStart=/usr/bin/node /opt/h3-studio/server.mjs
+Restart=always
+RestartSec=3
+TimeoutStopSec=15
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/data/h3-studio /var/lib/h3-studio /var/log/h3-studio
+
+[Install]
+WantedBy=multi-user.target

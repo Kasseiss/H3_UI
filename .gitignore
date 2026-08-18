@@ -1,0 +1,13 @@
+node_modules
+dist
+.DS_Store
+*.local
+*.tsbuildinfo
+server-storage/*
+!server-storage/.gitkeep
+data/*
+!data/.gitkeep
+logs/*
+!logs/.gitkeep
+workflows/h3-api.json
+MiniMax-Manager-Outline.md

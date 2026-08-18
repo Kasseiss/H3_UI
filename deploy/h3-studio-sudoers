@@ -1,0 +1,3 @@
+# Allow only the three ComfyUI lifecycle operations exposed by H3 Studio.
+# Install with: sudo install -m 0440 deploy/h3-studio-sudoers /etc/sudoers.d/h3-studio
+h3studio ALL=(root) NOPASSWD: /usr/bin/systemctl start comfyui.service, /usr/bin/systemctl restart comfyui.service, /usr/bin/systemctl stop comfyui.service
