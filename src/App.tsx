@@ -81,6 +81,8 @@ type Message = {
   note?: string
   outputUrl?: string
   sound?: boolean
+  samplingSteps?: number
+  currentStep?: number
 }
 
 type Thread = {
@@ -105,10 +107,19 @@ type StorageInfo = {
   used: number
 }
 
+type GpuStatus = {
+  name: string
+  utilization: number
+  memoryUsed: number
+  memoryTotal: number
+  temperature: number
+}
+
 type ComfyStatus = {
   connected: boolean
   device?: string
   workflowConfigured?: boolean
+  gpu?: GpuStatus
 }
 
 type ServerJob = {
@@ -125,6 +136,8 @@ type ServerJob = {
   outputs?: { kind: string; url: string }[]
   attachments?: { name: string; type: string; size: number; path?: string; comfyName?: string }[]
   createdAt: string
+  samplingSteps?: number
+  currentStep?: number
 }
 
 type EnvironmentComponent = {
@@ -222,6 +235,8 @@ function serverMessage(job: ServerJob): Message {
     error: job.error,
     note: job.note,
     outputUrl: job.outputs?.find((output) => ['videos', 'gifs'].includes(output.kind))?.url ?? job.outputs?.[0]?.url,
+    samplingSteps: job.samplingSteps,
+    currentStep: job.currentStep,
   }
 }
 
@@ -323,7 +338,7 @@ function App() {
           return response.json()
         })
         .then((status) => {
-          if (!cancelled) setComfyStatus({ connected: Boolean(status.connected), device: status.device, workflowConfigured: Boolean(status.workflowConfigured) })
+          if (!cancelled) setComfyStatus({ connected: Boolean(status.connected), device: status.device, workflowConfigured: Boolean(status.workflowConfigured), gpu: status.gpu })
         })
         .catch(() => {
           if (!cancelled) setComfyStatus({ connected: false })
@@ -656,6 +671,52 @@ function App() {
     } catch (error) { showToast(error instanceof Error ? error.message : '视频下载失败') }
   }
 
+  const downloadMessageVideo = async (message: Message) => {
+    if (!message.outputUrl) return showToast('这个结果还没有可下载的视频')
+    try {
+      const response = await fetch(message.outputUrl)
+      if (!response.ok) throw new Error('视频下载失败')
+      const blob = await response.blob()
+      const link = document.createElement('a')
+      link.href = URL.createObjectURL(blob)
+      link.download = `${message.jobId || 'h3-video'}.mp4`
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      window.setTimeout(() => URL.revokeObjectURL(link.href), 1000)
+      showToast('已开始下载视频')
+    } catch (error) { showToast(error instanceof Error ? error.message : '视频下载失败') }
+  }
+
+  const cancelGeneration = async (jobId: string, _threadId: string, assistantMessageId: string) => {
+    const threadId = activeThread
+    try {
+      await fetch(`/api/generations/${encodeURIComponent(jobId)}`, { method: 'DELETE' })
+      patchMessage(threadId, assistantMessageId, { status: 'failed', progress: 0, note: '任务已取消' })
+      setThreads((current) => current.map((thread) => thread.id === threadId ? { ...thread, meta: '需要处理' } : thread))
+      showToast('任务已取消')
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : '取消任务失败')
+    }
+  }
+
+  const deleteThread = async (threadId: string) => {
+    try {
+      await fetch(`/api/generations?conversationId=${encodeURIComponent(threadId)}`, { method: 'DELETE' })
+    } catch { /* 后端可能不支持，静默处理 */ }
+    setThreads((current) => current.filter((thread) => thread.id !== threadId))
+    setMessages((current) => {
+      const next = { ...current }
+      delete next[threadId]
+      return next
+    })
+    if (activeThread === threadId) {
+      const remaining = threads.filter((t) => t.id !== threadId)
+      setActiveThread(remaining[0]?.id ?? 'draft')
+    }
+    showToast('任务已删除')
+  }
+
   const filteredDriveItems = useMemo(
     () => driveItems.filter((item) => item.name.toLowerCase().includes(driveSearch.toLowerCase())),
     [driveItems, driveSearch],
@@ -689,6 +750,7 @@ function App() {
         }}
         onThreadOpen={openThread}
         onNewThread={createNewThread}
+        onDeleteThread={deleteThread}
         storageInfo={storageInfo}
         comfyStatus={comfyStatus}
       />
@@ -728,6 +790,8 @@ function App() {
             onSubmit={submitGeneration}
             onOpenPreview={() => setPreviewOpen(true)}
             onSaveGeneration={saveGeneration}
+            onCancelGeneration={cancelGeneration}
+            onDownloadMessage={downloadMessageVideo}
           />
         )}
 
@@ -808,6 +872,7 @@ type SidebarProps = {
   onViewChange: (view: View) => void
   onThreadOpen: (id: string) => void
   onNewThread: () => void
+  onDeleteThread: (id: string) => void
   storageInfo: StorageInfo
   comfyStatus: ComfyStatus
 }
@@ -821,6 +886,7 @@ function Sidebar({
   onViewChange,
   onThreadOpen,
   onNewThread,
+  onDeleteThread,
   storageInfo,
   comfyStatus,
 }: SidebarProps) {
@@ -875,7 +941,9 @@ function Sidebar({
                 <strong>{thread.title}</strong>
                 <small>{thread.meta}</small>
               </span>
-              <MoreHorizontal className="thread-more" size={16} />
+              <span className="thread-actions">
+                <Trash2 className="thread-delete" size={14} onClick={(e) => { e.stopPropagation(); onDeleteThread(thread.id) }} />
+              </span>
             </button>
           ))}
         </div>
@@ -894,6 +962,28 @@ function Sidebar({
             <span><strong>本机 ComfyUI</strong><small>{comfyStatus.connected ? (comfyStatus.workflowConfigured ? (comfyStatus.device || '连接正常') : '待放入 H3 工作流') : '等待连接'}</small></span>
             <span className={`status-dot ${comfyStatus.connected ? 'online' : 'offline'}`} />
           </div>
+          {comfyStatus.gpu && (
+            <div className="gpu-status-card">
+              <div className="gpu-status-header">
+                <Cpu size={13} />
+                <span>GPU 状态</span>
+              </div>
+              <div className="gpu-info-row">
+                <span className="gpu-name">{comfyStatus.gpu.name}</span>
+                <span className={`gpu-temp ${comfyStatus.gpu.temperature > 80 ? 'hot' : ''}`}>{comfyStatus.gpu.temperature}°C</span>
+              </div>
+              <div className="gpu-bar-row">
+                <span>利用率</span>
+                <div className="gpu-bar"><span style={{ width: `${comfyStatus.gpu.utilization}%` }} /></div>
+                <span className="gpu-bar-value">{comfyStatus.gpu.utilization}%</span>
+              </div>
+              <div className="gpu-bar-row">
+                <span>显存</span>
+                <div className="gpu-bar"><span style={{ width: `${(comfyStatus.gpu.memoryUsed / comfyStatus.gpu.memoryTotal) * 100}%` }} /></div>
+                <span className="gpu-bar-value">{comfyStatus.gpu.memoryUsed}/{comfyStatus.gpu.memoryTotal}MB</span>
+              </div>
+            </div>
+          )}
         </div>
       </aside>
     </>
@@ -942,6 +1032,8 @@ type CreateViewProps = {
   onSubmit: () => void
   onOpenPreview: () => void
   onSaveGeneration: (message: Message) => void
+  onCancelGeneration: (jobId: string, threadId: string, assistantMessageId: string) => void
+  onDownloadMessage: (message: Message) => void
 }
 
 function CreateView(props: CreateViewProps) {
@@ -969,6 +1061,8 @@ function CreateView(props: CreateViewProps) {
     onSubmit,
     onOpenPreview,
     onSaveGeneration,
+    onCancelGeneration,
+    onDownloadMessage,
   } = props
 
   return (
@@ -991,7 +1085,7 @@ function CreateView(props: CreateViewProps) {
       )}
 
       <div className={`conversation ${messages.length ? '' : 'empty'}`}>
-        {!messages.length ? <EmptyState onExample={onPromptChange} /> : <MessageList messages={messages} onOpenPreview={onOpenPreview} onSave={onSaveGeneration} />}
+        {!messages.length ? <EmptyState onExample={onPromptChange} /> : <MessageList messages={messages} onOpenPreview={onOpenPreview} onSave={onSaveGeneration} onCancel={onCancelGeneration} onDownload={onDownloadMessage} />}
       </div>
 
       <div className="composer-wrap">
@@ -1118,13 +1212,13 @@ function EmptyState({ onExample }: { onExample: (prompt: string) => void }) {
   )
 }
 
-function MessageList({ messages, onOpenPreview, onSave }: { messages: Message[]; onOpenPreview: () => void; onSave: (message: Message) => void }) {
+function MessageList({ messages, onOpenPreview, onSave, onCancel, onDownload }: { messages: Message[]; onOpenPreview: () => void; onSave: (message: Message) => void; onCancel: (jobId: string, threadId: string, assistantMessageId: string) => void; onDownload: (message: Message) => void }) {
   return (
     <div className="message-list">
       {messages.map((message) => message.role === 'user' ? (
         <UserMessage key={message.id} message={message} />
       ) : (
-        <AssistantMessage key={message.id} message={message} onOpenPreview={onOpenPreview} onSave={onSave} />
+        <AssistantMessage key={message.id} message={message} onOpenPreview={onOpenPreview} onSave={onSave} onCancel={onCancel} onDownload={onDownload} />
       ))}
     </div>
   )
@@ -1152,7 +1246,7 @@ function UserMessage({ message }: { message: Message }) {
   )
 }
 
-function AssistantMessage({ message, onOpenPreview, onSave }: { message: Message; onOpenPreview: () => void; onSave: (message: Message) => void }) {
+function AssistantMessage({ message, onOpenPreview, onSave, onCancel, onDownload }: { message: Message; onOpenPreview: () => void; onSave: (message: Message) => void; onCancel: (jobId: string, threadId: string, assistantMessageId: string) => void; onDownload: (message: Message) => void }) {
   const done = message.status === 'done'
   const failed = message.status === 'failed'
   const currentProgress = done ? 100 : Math.min(96, Math.max(8, message.progress ?? 8))
@@ -1178,8 +1272,18 @@ function AssistantMessage({ message, onOpenPreview, onSave }: { message: Message
             <div className="progress-info">
               <div className="progress-head"><strong>{progressLabels[stage]}</strong><span>{currentProgress}%</span></div>
               <div className="progress-track"><span style={{ width: `${currentProgress}%` }} /></div>
+              {message.samplingSteps && (
+                <div className="sampling-steps-info">
+                  <span>采样步数：{message.currentStep ?? 0} / {message.samplingSteps}</span>
+                </div>
+              )}
               <div className="progress-steps">{progressLabels.map((label, index) => <span className={index <= stage ? 'active' : ''} key={label}><i>{index < stage || done && index === 3 ? <Check size={9} /> : index + 1}</i>{label}</span>)}</div>
               <p>{message.note || '任务已持久化，你可以继续提交新的任务。'}</p>
+              {message.jobId && (
+                <button className="cancel-generation-button" onClick={() => onCancel(message.jobId!, 'current', message.id)}>
+                  <Square size={13} />取消任务
+                </button>
+              )}
             </div>
           </div>
         ) : (
@@ -1200,6 +1304,7 @@ function AssistantMessage({ message, onOpenPreview, onSave }: { message: Message
               <div className="result-actions">
                 <button><Copy size={15} />复制参数</button>
                 <button><RotateCcw size={15} />再次生成</button>
+                <button onClick={() => onDownload(message)}><Download size={15} />下载视频</button>
                 <button className="primary-small" onClick={() => onSave(message)}>保存到云盘</button>
               </div>
             </div>
