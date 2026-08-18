@@ -1217,7 +1217,7 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === 'POST' && url.pathname === '/api/harness/chat') {
-    if (!harnessConfig.apiBase || !harnessConfig.model || !harnessConfig.accessToken) return json(res, 503, { error: '服务器助手尚未配置，请先运行 deploy/configure-harness.sh' })
+    if (!harnessConfig.apiBase || !harnessConfig.model || !harnessConfig.accessToken) return json(res, 200, { reply: '服务器助手尚未配置 API，请在环境面板中配置后再使用。', toolResults: [] })
     if (!harnessAuthorized(req)) return json(res, 401, { error: '服务器助手访问令牌不正确' })
     if (activeHarnessRequests >= 2) return json(res, 429, { error: '服务器助手正忙，请稍后再试' })
     const body = await readJson(req)
