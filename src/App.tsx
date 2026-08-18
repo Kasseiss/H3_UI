@@ -153,6 +153,12 @@ type HarnessConfig = {
   tools: { name: string; mutating: boolean }[]
 }
 
+type HarnessDetails = {
+  apiBase: string
+  model: string
+  hasApiKey: boolean
+}
+
 type HarnessMessage = {
   role: 'user' | 'assistant'
   content: string
@@ -1379,6 +1385,7 @@ type UnifiedModalProps = {
   open: boolean
   title: string
   description?: string
+  className?: string
   confirmText?: string
   confirmDisabled?: boolean
   children: React.ReactNode
@@ -1386,7 +1393,7 @@ type UnifiedModalProps = {
   onConfirm: () => void
 }
 
-function UnifiedModal({ open, title, description, confirmText = '确定', confirmDisabled, children, onClose, onConfirm }: UnifiedModalProps) {
+function UnifiedModal({ open, title, description, className = '', confirmText = '确定', confirmDisabled, children, onClose, onConfirm }: UnifiedModalProps) {
   const [closing, setClosing] = useState(false)
   if (!open) return null
   const leave = (action: () => void) => {
@@ -1398,7 +1405,7 @@ function UnifiedModal({ open, title, description, confirmText = '确定', confir
     <div className={`ui-overlay ${closing ? 'closing' : ''}`} role="presentation" onMouseDown={(event) => {
       if (event.currentTarget === event.target) leave(onClose)
     }}>
-      <section className="ui-dialog" role="dialog" aria-modal="true" aria-labelledby="ui-dialog-title">
+      <section className={`ui-dialog ${className}`.trim()} role="dialog" aria-modal="true" aria-labelledby="ui-dialog-title">
         <header>
           <div><h2 id="ui-dialog-title">{title}</h2>{description && <p>{description}</p>}</div>
           <button className="icon-button" onClick={() => leave(onClose)} aria-label="关闭弹窗"><X size={17} /></button>
@@ -1435,6 +1442,10 @@ function EnvironmentView({ onToast }: { onToast: (message: string) => void }) {
   const [harnessBusy, setHarnessBusy] = useState(false)
   const [harnessMutations, setHarnessMutations] = useState(false)
   const [harnessMessages, setHarnessMessages] = useState<HarnessMessage[]>([])
+  const [harnessSetupOpen, setHarnessSetupOpen] = useState(false)
+  const [harnessSetupLoading, setHarnessSetupLoading] = useState(false)
+  const [harnessSetupSaving, setHarnessSetupSaving] = useState(false)
+  const [harnessSetupForm, setHarnessSetupForm] = useState({ apiBase: '', model: '', apiKey: '', clearApiKey: false })
   const [lines, setLines] = useState<TerminalLine[]>([
     { type: 'success', text: 'H3 环境终端已连接', time: new Date().toISOString() },
     { type: 'info', text: '输入 help 查看可用命令', time: new Date().toISOString() },
@@ -1467,6 +1478,44 @@ function EnvironmentView({ onToast }: { onToast: (message: string) => void }) {
   const refreshHarnessConfig = async () => {
     try { setHarnessConfig(await responseJson<HarnessConfig>(await fetch('/api/harness/config'))) }
     catch { setHarnessConfig(null) }
+  }
+
+  const openHarnessSetup = async () => {
+    setHarnessSetupOpen(true)
+    setHarnessSetupForm({ apiBase: '', model: harnessConfig?.model || '', apiKey: '', clearApiKey: false })
+    if (!harnessConfig?.configured || !harnessToken.trim()) return
+    setHarnessSetupLoading(true)
+    try {
+      const details = await responseJson<HarnessDetails>(await fetch('/api/harness/config/details', { headers: { Authorization: `Bearer ${harnessToken.trim()}` } }))
+      setHarnessSetupForm({ apiBase: details.apiBase, model: details.model, apiKey: '', clearApiKey: false })
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : '服务器助手配置读取失败')
+    } finally { setHarnessSetupLoading(false) }
+  }
+
+  const copyHarnessCommand = async () => {
+    try {
+      await navigator.clipboard.writeText('bash deploy/configure-harness.sh')
+      onToast('配置命令已复制')
+    } catch { onToast('请复制：bash deploy/configure-harness.sh') }
+  }
+
+  const saveHarnessSetup = async () => {
+    if (!harnessToken.trim()) { onToast('请先输入服务器助手访问令牌'); return }
+    if (!harnessSetupForm.apiBase.trim() || !harnessSetupForm.model.trim()) { onToast('请填写 API 地址和模型名称'); return }
+    setHarnessSetupSaving(true)
+    try {
+      const config = await responseJson<HarnessConfig>(await fetch('/api/harness/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${harnessToken.trim()}` },
+        body: JSON.stringify(harnessSetupForm),
+      }))
+      setHarnessConfig(config)
+      setHarnessSetupOpen(false)
+      onToast('服务器助手配置已保存')
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : '服务器助手配置保存失败')
+    } finally { setHarnessSetupSaving(false) }
   }
 
   useEffect(() => {
@@ -1600,6 +1649,7 @@ function EnvironmentView({ onToast }: { onToast: (message: string) => void }) {
           <div className="environment-meta"><span>{status?.platform || '正在识别服务器'}</span><i /><span>{status ? `服务已运行 ${Math.floor(status.uptime / 60)} 分钟` : '读取中'}</span></div>
         </div>
         <div className="environment-hero-actions">
+          <button className="secondary-button harness-hero-button" onClick={() => void openHarnessSetup()}><Settings size={15} />{harnessConfig?.configured ? '助手设置' : '配置服务器助手'}</button>
           <button className="secondary-button" onClick={() => void refreshStatus()} disabled={loading}><RotateCcw size={15} className={loading ? 'spin' : ''} />刷新</button>
           <button className="primary-button deploy-button" onClick={() => void prepareEnvironment()} disabled={deploying}><Zap size={16} />{deploying ? '正在接入…' : '一键部署并检查'}</button>
         </div>
@@ -1649,7 +1699,7 @@ function EnvironmentView({ onToast }: { onToast: (message: string) => void }) {
       <section className="server-harness-panel">
         <header>
           <div className="harness-title"><span><Bot size={18} /></span><div><strong>服务器助手</strong><small>{harnessConfig?.configured ? `${harnessConfig.model} · 安全工具模式` : '等待接入你的 API'}</small></div></div>
-          <span className={`harness-state ${harnessConfig?.configured ? 'online' : ''}`}><i />{harnessConfig?.configured ? '已配置' : '未配置'}</span>
+          <div className="harness-header-actions"><button className="harness-config-button" onClick={() => void openHarnessSetup()}><Settings size={13} />配置</button><span className={`harness-state ${harnessConfig?.configured ? 'online' : ''}`}><i />{harnessConfig?.configured ? '已配置' : '未配置'}</span></div>
         </header>
         {!harnessConfig?.configured ? (
           <div className="harness-empty"><ShieldCheck size={21} /><div><strong>先在服务器完成一次安全配置</strong><p>运行 <code>bash deploy/configure-harness.sh</code>，填写 API 地址、模型和密钥。API Key 不会发送到浏览器。</p></div></div>
@@ -1677,6 +1727,35 @@ function EnvironmentView({ onToast }: { onToast: (message: string) => void }) {
           </>
         )}
       </section>
+      <UnifiedModal
+        open={harnessSetupOpen}
+        className="harness-dialog"
+        title={harnessConfig?.configured ? '服务器助手设置' : '配置服务器助手'}
+        description={harnessConfig?.configured ? '修改后立即对当前 H3 服务生效。' : '首次接入需要在服务器上运行一次配置命令。'}
+        confirmText={harnessConfig?.configured ? (harnessSetupSaving ? '保存中…' : '保存配置') : '复制配置命令'}
+        confirmDisabled={harnessConfig?.configured ? harnessSetupLoading || harnessSetupSaving || !harnessToken.trim() || !harnessSetupForm.apiBase.trim() || !harnessSetupForm.model.trim() : false}
+        onClose={() => setHarnessSetupOpen(false)}
+        onConfirm={() => { if (harnessConfig?.configured) void saveHarnessSetup(); else void copyHarnessCommand() }}
+      >
+        {!harnessConfig?.configured ? (
+          <div className="harness-setup-guide">
+            <div className="harness-command-card"><div><span>在服务器项目目录执行</span><code>bash deploy/configure-harness.sh</code></div><button onClick={() => void copyHarnessCommand()}><Copy size={14} />复制</button></div>
+            <ol><li>填写你的 API 基础地址、模型名称和 API Key。</li><li>脚本会生成网页访问令牌并自动重启 H3。</li><li>回到这里刷新页面，再输入访问令牌即可使用。</li></ol>
+            <p className="harness-setup-note"><ShieldCheck size={14} />API Key 只保存在服务器，不会写入浏览器或日志。</p>
+          </div>
+        ) : (
+          <div className="harness-config-form">
+            {harnessSetupLoading ? <div className="harness-config-loading">正在读取当前配置…</div> : <>
+              <label className="ui-field"><span>网页访问令牌</span><input type="password" value={harnessToken} onChange={(event) => { setHarnessToken(event.target.value); window.sessionStorage.setItem('h3-harness-token', event.target.value) }} placeholder="配置脚本生成的令牌" autoComplete="off" /></label>
+              <label className="ui-field"><span>API 基础地址</span><input value={harnessSetupForm.apiBase} onChange={(event) => setHarnessSetupForm((current) => ({ ...current, apiBase: event.target.value }))} placeholder="https://api.example.com/v1" /></label>
+              <label className="ui-field"><span>模型名称</span><input value={harnessSetupForm.model} onChange={(event) => setHarnessSetupForm((current) => ({ ...current, model: event.target.value }))} placeholder="例如：ops-model" /></label>
+              <label className="ui-field"><span>API Key <em>留空保持现有密钥</em></span><input type="password" value={harnessSetupForm.apiKey} onChange={(event) => setHarnessSetupForm((current) => ({ ...current, apiKey: event.target.value }))} placeholder={harnessSetupForm.clearApiKey ? '已选择清除密钥' : '不会回显现有密钥'} autoComplete="new-password" /></label>
+              <label className="harness-clear-key"><input type="checkbox" checked={harnessSetupForm.clearApiKey} onChange={(event) => setHarnessSetupForm((current) => ({ ...current, clearApiKey: event.target.checked, apiKey: '' }))} /><span>清除当前 API Key（仅无鉴权内网 API 使用）</span></label>
+              <p className="harness-setup-note"><ShieldCheck size={14} />保存写入服务器 .h3.env，API Key 不会返回到页面。</p>
+            </>}
+          </div>
+        )}
+      </UnifiedModal>
       <UnifiedModal
         open={Boolean(serviceAction)}
         title={serviceAction === 'stop' ? '停止 ComfyUI？' : '重启 ComfyUI？'}

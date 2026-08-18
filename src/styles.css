@@ -1473,6 +1473,7 @@ select:focus-visible {
 .ui-dialog-body { padding: 9px 18px 19px; }
 .ui-dialog > footer { display: flex; justify-content: flex-end; padding: 11px 14px 14px; border-top: 1px solid #eeeeeb; background: #fafaf9; gap: 7px; }
 .ui-dialog .primary-button:disabled { cursor: not-allowed; opacity: .45; box-shadow: none; }
+.ui-dialog.harness-dialog { width: min(100%, 470px); }
 
 .ui-field { display: block; }
 .ui-field > span { display: block; margin: 0 0 7px 2px; color: #77777e; font-size: 9px; font-weight: 650; }
@@ -1558,6 +1559,7 @@ select:focus-visible {
 .environment-meta i { width: 3px; height: 3px; border-radius: 50%; background: #c9c9cc; }
 .environment-hero-actions { display: flex; align-items: center; gap: 8px; }
 .environment-hero-actions button { min-height: 36px; }
+.harness-hero-button { color: #5556c4; border-color: #d6d6ef; background: #fafaff; }
 .deploy-button { min-width: 126px; }
 .spin { animation: deploy-spin .8s linear infinite; }
 @keyframes deploy-spin { to { transform: rotate(360deg); } }
@@ -1585,6 +1587,9 @@ select:focus-visible {
 
 .ui-terminal-panel {
   order: 2;
+  display: flex;
+  min-height: clamp(500px, 62vh, 680px);
+  flex-direction: column;
   overflow: hidden;
   border: 1px solid #dcdcd9;
   border-radius: 14px;
@@ -1614,7 +1619,7 @@ select:focus-visible {
 .terminal-shortcuts::before { margin-right: 3px; color: #73737b; font: 8px 'SFMono-Regular', Consolas, monospace; content: 'QUICK'; }
 .terminal-shortcuts button { padding: 4px 7px; cursor: pointer; color: #aaaab1; font: 8px 'SFMono-Regular', Consolas, monospace; border: 1px solid #424247; border-radius: 5px; background: #2d2d30; transition: 140ms ease; }
 .terminal-shortcuts button:hover { color: #e2e2e7; border-color: #64646c; background: #38383c; }
-.terminal-output { height: clamp(320px, 43vh, 520px); padding: 11px 13px 19px; overflow: auto; color: #d0d0d4; font: 10px/1.65 'SFMono-Regular', Consolas, 'Liberation Mono', monospace; background: #1e1e20; scrollbar-color: #46464b transparent; }
+.terminal-output { min-height: 0; flex: 1; padding: 16px 17px 22px; overflow: auto; color: #d0d0d4; font: 10px/1.65 'SFMono-Regular', Consolas, 'Liberation Mono', monospace; background: #1e1e20; scrollbar-color: #46464b transparent; }
 .terminal-output p { display: flex; margin: 0; white-space: pre-wrap; word-break: break-word; animation: terminal-line-in 160ms ease both; }
 @keyframes terminal-line-in { from { opacity: 0; transform: translateX(-3px); } }
 .terminal-output time { width: 68px; flex: 0 0 auto; color: #64646b; }
@@ -1642,6 +1647,9 @@ select:focus-visible {
 
 .server-harness-panel { order: 4; overflow: hidden; border: 1px solid #e3e3e0; border-radius: 15px; background: #fff; box-shadow: 0 9px 30px rgba(28,28,36,.05); animation: content-rise 360ms 120ms ease both; }
 .server-harness-panel > header { display: flex; min-height: 58px; align-items: center; justify-content: space-between; padding: 10px 15px; border-bottom: 1px solid #ecece9; }
+.harness-header-actions { display: flex; align-items: center; gap: 7px; }
+.harness-config-button { display: inline-flex; min-height: 27px; align-items: center; padding: 0 8px; cursor: pointer; color: #6061c9; font-size: 8px; font-weight: 650; border: 1px solid #d9d9ef; border-radius: 7px; background: #fafaff; gap: 4px; transition: 140ms ease; }
+.harness-config-button:hover { border-color: #bdbde7; background: #f4f3ff; transform: translateY(-1px); }
 .harness-title { display: flex; align-items: center; gap: 9px; }
 .harness-title > span { display: grid; width: 34px; height: 34px; color: #fff; border-radius: 10px; background: linear-gradient(145deg, #6e6fe2, #4d4ebc); box-shadow: 0 6px 16px rgba(82,83,196,.22); place-items: center; }
 .harness-title strong, .harness-title small { display: block; }
@@ -1686,6 +1694,19 @@ select:focus-visible {
 .harness-input button { display: grid; width: 36px; height: 36px; flex: 0 0 auto; cursor: pointer; color: #fff; border: 0; border-radius: 10px; background: #5d5ed2; box-shadow: 0 5px 13px rgba(80,81,190,.2); place-items: center; transition: 150ms ease; }
 .harness-input button:hover { transform: translateY(-1px); }
 .harness-input button:disabled { cursor: default; opacity: .35; box-shadow: none; transform: none; }
+.harness-setup-guide { display: grid; gap: 14px; }
+.harness-command-card { display: flex; align-items: center; justify-content: space-between; padding: 12px; border: 1px solid #e4e4f0; border-radius: 10px; background: #fafaff; gap: 10px; }
+.harness-command-card span { display: block; margin-bottom: 6px; color: #898991; font-size: 8px; }
+.harness-command-card code { color: #5051bf; font: 10px 'SFMono-Regular', Consolas, monospace; }
+.harness-command-card button { display: inline-flex; min-height: 30px; align-items: center; padding: 0 8px; cursor: pointer; color: #5d5ecb; font-size: 8px; border: 1px solid #d5d5ec; border-radius: 7px; background: #fff; gap: 4px; }
+.harness-setup-guide ol { margin: 0; padding-left: 19px; color: #77777f; font-size: 9px; line-height: 1.8; }
+.harness-setup-note { display: flex; align-items: center; margin: 0; color: #85858d; font-size: 8px; line-height: 1.5; gap: 6px; }
+.harness-setup-note svg { flex: 0 0 auto; color: #5d5ecb; }
+.harness-config-form { display: grid; gap: 12px; }
+.harness-config-form .ui-field > span em { margin-left: 4px; color: #aaaab0; font-size: 8px; font-style: normal; font-weight: 400; }
+.harness-clear-key { display: flex; align-items: center; color: #77777f; font-size: 8px; gap: 6px; }
+.harness-clear-key input { width: 14px; height: 14px; accent-color: #6263d5; }
+.harness-config-loading { min-height: 170px; display: grid; color: #85858d; font-size: 10px; place-items: center; }
 
 .toast {
   position: fixed;
@@ -2093,7 +2114,8 @@ select:focus-visible {
   .terminal-header-actions button, .terminal-header-actions a { flex: 1 0 auto; justify-content: center; }
   .terminal-runtime { display: none; }
   .terminal-shortcuts { overflow-x: auto; }
-  .terminal-output { height: 360px; font-size: 9px; }
+  .ui-terminal-panel { min-height: 500px; }
+  .terminal-output { min-height: 380px; font-size: 9px; }
   .harness-access-row { align-items: stretch; flex-direction: column; }
   .harness-access-row > label:first-child { min-width: 0; }
   .harness-permission { min-height: 25px; }

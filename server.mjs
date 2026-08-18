@@ -12,6 +12,7 @@ import { createServerHarness } from './lib/server-harness.mjs'
 
 const projectRoot = path.dirname(fileURLToPath(import.meta.url))
 const distRoot = path.join(projectRoot, 'dist')
+const envFilePath = path.resolve(process.env.H3_ENV_FILE || path.join(projectRoot, '.h3.env'))
 const storageRoot = path.resolve(process.env.H3_STORAGE_ROOT || path.join(projectRoot, 'server-storage'))
 const dataRoot = path.resolve(process.env.H3_DATA_ROOT || path.join(projectRoot, 'data'))
 const logRoot = path.resolve(process.env.H3_LOG_ROOT || path.join(projectRoot, 'logs'))
@@ -92,8 +93,27 @@ async function log(level, event, details = {}) {
 
 async function atomicWrite(target, value) {
   const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`
-  await writeFile(temporary, value, 'utf8')
+  await writeFile(temporary, value, { encoding: 'utf8', mode: target === envFilePath ? 0o600 : 0o644 })
   await rename(temporary, target)
+}
+
+function shellEnvValue(value) {
+  return `'${String(value ?? '').replaceAll("'", "'\\''")}'`
+}
+
+async function persistHarnessConfig() {
+  let existing = ''
+  try { existing = await readFile(envFilePath, 'utf8') } catch (error) {
+    if (error?.code !== 'ENOENT') throw error
+  }
+  const kept = existing.split(/\r?\n/).filter((line) => !/^H3_HARNESS_[A-Z0-9_]+=/.test(line))
+  const settings = [
+    ['H3_HARNESS_API_BASE', harnessConfig.apiBase],
+    ['H3_HARNESS_MODEL', harnessConfig.model],
+    ['H3_HARNESS_API_KEY', harnessConfig.apiKey],
+    ['H3_HARNESS_ACCESS_TOKEN', harnessConfig.accessToken],
+  ].map(([name, value]) => `${name}=${shellEnvValue(value)}`)
+  await atomicWrite(envFilePath, `${[...kept.filter(Boolean), ...settings].join('\n')}\n`)
 }
 
 let environmentConfigChain = Promise.resolve()
@@ -937,6 +957,26 @@ function harnessAuthorized(req) {
   return expectedBuffer.length === providedBuffer.length && expectedBuffer.length > 0 && timingSafeEqual(expectedBuffer, providedBuffer)
 }
 
+function harnessPublicConfig() {
+  return {
+    configured: Boolean(harnessConfig.apiBase && harnessConfig.model && harnessConfig.accessToken),
+    model: harnessConfig.model || null,
+    hasApiKey: Boolean(harnessConfig.apiKey),
+    tools: harnessTools.map((tool) => ({ name: tool.name, mutating: Boolean(tool.mutating) })),
+  }
+}
+
+function validateHarnessConfigInput(body) {
+  const apiBase = String(body.apiBase || '').trim().replace(/\/+$/, '')
+  const model = String(body.model || '').trim()
+  if (!apiBase || !model) throw new Error('API 地址和模型名称不能为空')
+  if (apiBase.length > 500 || model.length > 200 || /[\r\n]/.test(`${apiBase}${model}`)) throw new Error('API 地址或模型名称格式不合法')
+  let parsed
+  try { parsed = new URL(apiBase) } catch { throw new Error('API 地址无效，请填写完整的 HTTP 或 HTTPS 地址') }
+  if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('API 地址仅支持 HTTP 或 HTTPS')
+  return { apiBase, model }
+}
+
 async function handleApi(req, res, url) {
   if (req.method === 'GET' && url.pathname === '/api/health') {
     let comfy = { connected: false }
@@ -952,12 +992,32 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === 'GET' && url.pathname === '/api/harness/config') {
-    return json(res, 200, {
-      configured: Boolean(harnessConfig.apiBase && harnessConfig.model && harnessConfig.accessToken),
-      model: harnessConfig.model || null,
-      hasApiKey: Boolean(harnessConfig.apiKey),
-      tools: harnessTools.map((tool) => ({ name: tool.name, mutating: Boolean(tool.mutating) })),
-    })
+    return json(res, 200, harnessPublicConfig())
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/harness/config/details') {
+    if (!harnessAuthorized(req)) return json(res, 401, { error: '服务器助手访问令牌不正确' })
+    return json(res, 200, { apiBase: harnessConfig.apiBase || '', model: harnessConfig.model || '', hasApiKey: Boolean(harnessConfig.apiKey) })
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/harness/config') {
+    if (!harnessConfig.accessToken) return json(res, 503, { error: '首次配置请运行 deploy/configure-harness.sh' })
+    if (!harnessAuthorized(req)) return json(res, 401, { error: '服务器助手访问令牌不正确' })
+    const body = await readJson(req)
+    try {
+      const next = validateHarnessConfigInput(body)
+      const nextKey = String(body.apiKey || '')
+      if (nextKey.length > 2000 || /[\r\n]/.test(nextKey)) throw new Error('API Key 格式不合法')
+      harnessConfig.apiBase = next.apiBase
+      harnessConfig.model = next.model
+      if (body.clearApiKey === true) harnessConfig.apiKey = ''
+      else if (nextKey.trim()) harnessConfig.apiKey = nextKey.trim()
+      await persistHarnessConfig()
+      await log('info', 'harness_config_updated', { model: harnessConfig.model, hasApiKey: Boolean(harnessConfig.apiKey) })
+      return json(res, 200, harnessPublicConfig())
+    } catch (error) {
+      return json(res, 400, { error: error instanceof Error ? error.message : '服务器助手配置失败' })
+    }
   }
 
   if (req.method === 'POST' && url.pathname === '/api/harness/chat') {
