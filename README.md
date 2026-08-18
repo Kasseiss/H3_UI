@@ -25,7 +25,7 @@ npm install
 npm run start
 ```
 
-默认访问：`http://127.0.0.1:3100`
+默认访问：`http://127.0.0.1:51249`
 
 开发时分别运行：
 
@@ -43,10 +43,10 @@ npm run dev
 3. 按 [workflows/README.md](workflows/README.md) 替换需要动态控制的值。
 4. 保存为 `workflows/h3-api.json`，或设置 `H3_WORKFLOW_PATH`。
 
-默认连接 `http://127.0.0.1:8188`。可用环境变量覆盖：
+默认连接 `http://127.0.0.1:51250`。可用环境变量覆盖：
 
 ```bash
-COMFYUI_URL=http://127.0.0.1:8188 \
+COMFYUI_URL=http://127.0.0.1:51250 \
 H3_WORKFLOW_PATH=/opt/h3-studio/workflows/h3-api.json \
 npm run start
 ```
@@ -85,8 +85,8 @@ journalctl -u h3-studio -f
 | 变量 | 默认值 | 用途 |
 | --- | --- | --- |
 | `H3_HOST` | `127.0.0.1` | 监听地址 |
-| `H3_PORT` | `3100` | 页面与接口端口 |
-| `COMFYUI_URL` | `http://127.0.0.1:8188` | 本机 ComfyUI 地址 |
+| `H3_PORT` | `51249` | 页面与接口端口 |
+| `COMFYUI_URL` | `http://127.0.0.1:51250` | 本机 ComfyUI 地址 |
 | `H3_WORKFLOW_PATH` | `workflows/h3-api.json` | H3 API 工作流 |
 | `H3_STORAGE_ROOT` | `server-storage` | 服务器云盘目录 |
 | `H3_DATA_ROOT` | `data` | 任务状态目录 |
