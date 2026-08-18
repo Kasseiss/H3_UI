@@ -17,6 +17,7 @@ const logRoot = path.resolve(process.env.H3_LOG_ROOT || path.join(projectRoot, '
 const jobStorePath = path.join(dataRoot, 'generations.json')
 const environmentConfigPath = path.join(dataRoot, 'environment.json')
 const workflowPath = path.resolve(process.env.H3_WORKFLOW_PATH || path.join(projectRoot, 'workflows', 'h3-api.json'))
+const bundledWorkflowPath = path.join(projectRoot, 'workflows', 'h3-api.template.json')
 const port = Number(process.env.H3_PORT || 12233)
 const host = process.env.H3_HOST || '0.0.0.0'
 let savedEnvironmentConfig = {}
@@ -534,16 +535,18 @@ async function environmentStatus() {
   try { await access(storageRoot, fsConstants.R_OK | fsConstants.W_OK) } catch { storageWritable = false }
   const disk = await statfs(storageRoot)
   const freeBytes = Number(disk.bavail * disk.bsize)
+  const minimumFreeBytes = Number(process.env.H3_MIN_FREE_BYTES || 2 * 1024 * 1024 * 1024)
+  const storageReady = storageWritable && freeBytes >= minimumFreeBytes
   const components = [
     { id: 'web', name: 'H3 网页服务', status: 'ready', detail: `Node ${process.version} · ${host}:${port}` },
     { id: 'comfy', name: '本机 ComfyUI', status: comfy.connected ? 'ready' : 'missing', detail: comfy.connected ? `${comfy.device || '运行中'} · ${comfyUrl}` : comfyRoot || comfyStartScript ? `已发现，等待启动 · ${comfyUrl}` : `未发现 · 已检查 ${comfyUrl}` },
     { id: 'workflow', name: 'H3 API 工作流', status: workflow ? 'ready' : 'missing', detail: workflow ? '已载入 768P 工作流' : '等待 h3-api.json' },
-    { id: 'ffmpeg', name: 'FFmpeg 视频工具', status: ffmpeg.ok ? 'ready' : 'missing', detail: ffmpeg.ok ? (ffmpeg.output.split('\n')[0] || '可用') : '未检测到 FFmpeg' },
-    { id: 'storage', name: '服务器文件空间', status: storageWritable ? 'ready' : 'missing', detail: storageWritable ? `可读写 · 剩余 ${Math.round(freeBytes / 1024 / 1024 / 1024)} GB` : '目录不可写' },
+    { id: 'ffmpeg', name: 'FFmpeg 视频工具', status: ffmpeg.ok ? 'ready' : 'attention', detail: ffmpeg.ok ? (ffmpeg.output.split('\n')[0] || '可用') : '可选组件未安装，不影响 ComfyUI 直接输出' },
+    { id: 'storage', name: '服务器文件空间', status: storageReady ? 'ready' : 'attention', detail: !storageWritable ? '目录不可写' : storageReady ? `可读写 · 剩余 ${Math.round(freeBytes / 1024 / 1024 / 1024)} GB` : `空间不足 · 仅剩 ${Math.round(freeBytes / 1024 / 1024)} MB，生成前请扩容或更换目录` },
     { id: 'service', name: '运行方式', status: process.platform !== 'linux' ? 'development' : service.ok ? 'ready' : 'attention', detail: process.platform !== 'linux' ? '当前为开发模式' : hasSystemd ? (service.ok ? 'systemd 正在守护' : '等待启用 h3-studio.service') : '已适配无 systemd 的容器环境' },
   ]
   return {
-    ready: comfy.connected && workflow && ffmpeg.ok && storageWritable,
+    ready: comfy.connected && workflow && storageReady,
     platform: `${process.platform} ${process.arch}`,
     uptime: Math.floor(process.uptime()),
     checkedAt: new Date().toISOString(),
@@ -623,13 +626,66 @@ function fillWorkflow(value, replacements) {
   return Object.entries(replacements).reduce((result, [token, replacement]) => result.replaceAll(token, String(replacement)), value)
 }
 
-async function workflowAvailable() {
-  try {
-    const file = await stat(workflowPath)
-    return file.isFile()
-  } catch {
-    return false
+async function activeWorkflowPath() {
+  for (const candidate of [workflowPath, bundledWorkflowPath]) {
+    try { if ((await stat(candidate)).isFile()) return candidate } catch { /* try fallback */ }
   }
+  return ''
+}
+
+async function workflowAvailable() {
+  return Boolean(await activeWorkflowPath())
+}
+
+function comboValues(objectInfo, nodeName, inputName) {
+  const definition = objectInfo?.[nodeName]?.input?.required?.[inputName]
+  if (!Array.isArray(definition)) return []
+  if (Array.isArray(definition[0])) return definition[0]
+  return Array.isArray(definition[1]?.options) ? definition[1].options : []
+}
+
+function selectModel(values, includes, label) {
+  const candidates = values.filter((value) => includes.every((needle) => String(value).toLowerCase().includes(needle)))
+  const selected = candidates.sort((a, b) => {
+    const score = (value) => ['ref2va', 'int8', 'nvfp4', 'fp16', 'fp32'].reduce((total, token, index) => total + (String(value).toLowerCase().includes(token) ? 10 - index : 0), 0)
+    return score(b) - score(a)
+  })[0]
+  if (!selected) throw new Error(`ComfyUI 中未找到 ${label}，请先安装 H3 768P 本地模型`)
+  return selected
+}
+
+async function resolveH3Models() {
+  const response = await fetch(`${comfyUrl}/object_info`, { signal: AbortSignal.timeout(10000) })
+  if (!response.ok) throw new Error(`无法读取 ComfyUI 模型列表 (${response.status})`)
+  const objectInfo = await response.json()
+  return {
+    unet: selectModel(comboValues(objectInfo, 'UNETLoader', 'unet_name'), ['minimax', 'h3'], 'MiniMax H3 主模型'),
+    clip: selectModel(comboValues(objectInfo, 'CLIPLoader', 'clip_name'), ['minimax', 'h3'], 'MiniMax H3 文本编码器'),
+    videoVae: selectModel(comboValues(objectInfo, 'VAELoader', 'vae_name'), ['minimax', 'h3', 'video'], 'MiniMax H3 视频 VAE'),
+    audioVae: selectModel(comboValues(objectInfo, 'VAELoader', 'vae_name'), ['minimax', 'h3', 'audio'], 'MiniMax H3 音频 VAE'),
+  }
+}
+
+function pruneUnresolvedWorkflow(graph) {
+  const result = structuredClone(graph)
+  const removed = new Set()
+  for (const [nodeId, node] of Object.entries(result)) {
+    if (/\{\{[A-Z0-9_]+\}\}/.test(JSON.stringify(node?.inputs || {}))) removed.add(nodeId)
+  }
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const [nodeId, node] of Object.entries(result)) {
+      if (removed.has(nodeId)) continue
+      for (const [key, value] of Object.entries(node?.inputs || {})) {
+        if (!Array.isArray(value) || !removed.has(String(value[0]))) continue
+        if (/^ref_(?:images|videos|video_audios|audios)\./.test(key)) delete node.inputs[key]
+        else { removed.add(nodeId); changed = true; break }
+      }
+    }
+  }
+  for (const nodeId of removed) delete result[nodeId]
+  return result
 }
 
 async function submitGeneration(body) {
@@ -637,13 +693,17 @@ async function submitGeneration(body) {
   const aspect = Object.hasOwn(dimensions, body.aspect) ? body.aspect : '16:9'
   const duration = Math.min(15, Math.max(5, Number.parseInt(body.duration, 10) || 5))
   if (!prompt && (!Array.isArray(body.attachments) || body.attachments.length === 0)) throw new Error('请输入提示词或添加参考素材')
-  if (!await workflowAvailable()) {
+  const selectedWorkflowPath = await activeWorkflowPath()
+  if (!selectedWorkflowPath) {
     const error = new Error('尚未配置 H3 API 工作流，请将 ComfyUI API 格式工作流放到 workflows/h3-api.json')
     error.code = 'WORKFLOW_NOT_CONFIGURED'
     throw error
   }
   await comfyStatus(4000)
-  const workflowFile = JSON.parse(await readFile(workflowPath, 'utf8'))
+  const [workflowFile, models] = await Promise.all([
+    readFile(selectedWorkflowPath, 'utf8').then(JSON.parse),
+    resolveH3Models(),
+  ])
   const size = dimensions[aspect]
   const seed = Number.isSafeInteger(body.seed) ? body.seed : Math.floor(Math.random() * 2_147_483_647)
   const replacements = {
@@ -654,6 +714,10 @@ async function submitGeneration(body) {
     '{{FRAMES}}': videoFrames(duration),
     '{{SEED}}': seed,
     '{{AUDIO}}': body.sound !== false,
+    '{{UNET_MODEL}}': models.unet,
+    '{{CLIP_MODEL}}': models.clip,
+    '{{VIDEO_VAE}}': models.videoVae,
+    '{{AUDIO_VAE}}': models.audioVae,
   }
   const attachmentGroups = { image: [], video: [], audio: [] }
   for (const attachment of Array.isArray(body.attachments) ? body.attachments : []) {
@@ -668,7 +732,10 @@ async function submitGeneration(body) {
   ;(Array.isArray(body.attachments) ? body.attachments : []).forEach((attachment, index) => {
     replacements[`{{REFERENCE_${index + 1}}}`] = attachment.comfyName || attachment.name || ''
   })
-  const graph = fillWorkflow(workflowFile.prompt || workflowFile, replacements)
+  const graph = pruneUnresolvedWorkflow(fillWorkflow(workflowFile.prompt || workflowFile, replacements))
+  if (body.sound === false) {
+    for (const node of Object.values(graph)) if (node?.class_type === 'CreateVideo') delete node.inputs.audio
+  }
   const response = await fetch(`${comfyUrl}/prompt`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

@@ -81,6 +81,8 @@ npm run dev
 3. 按 [workflows/README.md](workflows/README.md) 替换需要动态控制的值。
 4. 保存为 `workflows/h3-api.json`，或设置 `H3_WORKFLOW_PATH`。
 
+如果没有提供自定义文件，H3 会使用仓库内置的本地 768P 通用工作流，并根据当前 ComfyUI 的模型列表自动选择 H3 主模型、文本编码器、视频 VAE 和音频 VAE。自定义 `h3-api.json` 始终优先。
+
 未指定时先检查 `http://127.0.0.1:12234`，连接失败后继续检查本机 ComfyUI 进程、常见端口、启动脚本和安装目录。发现结果会保存，下一次启动直接复用。也可用环境变量明确指定：
 
 ```bash
@@ -136,6 +138,7 @@ journalctl -u h3-studio -f
 | `H3_STORAGE_ROOT` | `server-storage` | 服务器云盘目录 |
 | `H3_DATA_ROOT` | `data` | 任务状态目录 |
 | `H3_LOG_ROOT` | `logs` | 日志目录 |
+| `H3_MIN_FREE_BYTES` | `2147483648` | 服务器云盘进入“可生成”状态所需的最小剩余空间 |
 | `H3_MAX_UPLOAD_BYTES` | `4294967296` | 单文件上传上限 |
 | `COMFYUI_SERVICE_NAME` | `comfyui.service` | systemd 中的 ComfyUI 服务名 |
 | `COMFYUI_SERVICE_SCOPE` | `system` | `system` 或 `user` 服务 |
