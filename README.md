@@ -19,6 +19,33 @@ MiniMax H3 单机一体化创作界面。管理页面、任务服务、ComfyUI �
 - 受控的 ComfyUI 启动、重启、停止和日志命令
 - H3 服务启动及“环境部署”页面打开时自动拉起 ComfyUI
 
+## 一键部署（推荐）
+
+Linux 服务器执行：
+
+```bash
+git clone https://github.com/Kasseiss/H3_UI.git
+cd H3_UI
+sudo bash deploy/install.sh
+```
+
+安装程序不依赖 `/root/comfy`、`/opt/h3-studio` 等固定位置。它会自动检测 Node.js、Python、FFmpeg、现有 ComfyUI、启动脚本以及 systemd：
+
+- 有 systemd：自动注册并启用 `h3-studio.service`
+- 无 systemd 的容器：自动启用项目自带的守护进程
+- 已有 ComfyUI：记录真实目录、Python、启动脚本和端口
+- 完全空的服务器：默认安装基础 ComfyUI 到可配置的数据目录
+
+默认数据目录遵循 `$XDG_DATA_HOME`，可在安装前通过 `H3_RUNTIME_ROOT` 修改。若不希望自动安装基础 ComfyUI，可设置 `H3_INSTALL_COMFYUI=0`。
+
+部署完成后打开 `http://服务器IP:12233`。服务控制命令：
+
+```bash
+bash deploy/h3ctl.sh status
+bash deploy/h3ctl.sh restart
+bash deploy/h3ctl.sh logs
+```
+
 ## 本地运行
 
 ```bash
@@ -28,7 +55,7 @@ npm run start
 
 正式部署服务监听：`0.0.0.0:12233`，访问地址使用服务器 IP 或域名，例如 `http://服务器IP:12233`。
 
-ComfyUI 只在服务器内部监听 `127.0.0.1:12234`，由 H3 Studio 转发调用，不建议直接开放到公网。
+ComfyUI 可只在服务器内部监听，由 H3 Studio 调用，不建议直接开放到公网。H3 会自动识别正在运行的 ComfyUI、常见端口、启动脚本与安装目录。
 
 如果服务器启用了 UFW，需要放行 H3 端口：
 
@@ -54,9 +81,7 @@ npm run dev
 3. 按 [workflows/README.md](workflows/README.md) 替换需要动态控制的值。
 4. 保存为 `workflows/h3-api.json`，或设置 `H3_WORKFLOW_PATH`。
 
-默认连接 `http://127.0.0.1:12234`。可用环境变量覆盖：
-
-你的 ComfyUI 启动服务也需要监听 `12234`，例如启动参数使用 `--port 12234`；否则 H3 页面会显示 ComfyUI 未连接。
+未指定时先检查 `http://127.0.0.1:12234`，连接失败后继续检查本机 ComfyUI 进程、常见端口、启动脚本和安装目录。发现结果会保存，下一次启动直接复用。也可用环境变量明确指定：
 
 ```bash
 COMFYUI_URL=http://127.0.0.1:12234 \
@@ -77,7 +102,7 @@ npm run start
 
 健康检查：`GET /api/health`
 
-服务器部署可使用 [deploy/h3-studio.service](deploy/h3-studio.service)。先按实际用户和目录修改文件，再安装：
+通常直接使用 `deploy/install.sh`。如果需要手动采用固定的 systemd 模板，也可以使用 [deploy/h3-studio.service](deploy/h3-studio.service)：
 
 ```bash
 sudo install -d -o h3studio -g h3studio /data/h3-studio /var/lib/h3-studio /var/log/h3-studio
@@ -101,6 +126,12 @@ journalctl -u h3-studio -f
 | `H3_HOST` | `0.0.0.0` | 监听地址 |
 | `H3_PORT` | `12233` | 页面与接口端口 |
 | `COMFYUI_URL` | `http://127.0.0.1:12234` | 本机 ComfyUI 地址 |
+| `COMFYUI_ROOT` | 自动发现 | ComfyUI 安装目录；设置后优先使用 |
+| `COMFYUI_PYTHON` | 自动发现 | 启动 ComfyUI 使用的 Python |
+| `COMFYUI_START_SCRIPT` | 自动发现 | 现有 ComfyUI 启动脚本 |
+| `H3_COMFYUI_DISCOVERY_PORTS` | `8188,12234,30010,51250` | 自动探测的本机端口列表 |
+| `H3_COMFYUI_SEARCH_ROOTS` | 常用服务器目录 | 附加搜索目录，使用系统路径分隔符 |
+| `H3_COMFYUI_LISTEN` | `0.0.0.0` | H3 直接启动 ComfyUI 时的监听地址 |
 | `H3_WORKFLOW_PATH` | `workflows/h3-api.json` | H3 API 工作流 |
 | `H3_STORAGE_ROOT` | `server-storage` | 服务器云盘目录 |
 | `H3_DATA_ROOT` | `data` | 任务状态目录 |

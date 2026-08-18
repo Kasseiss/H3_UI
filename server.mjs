@@ -1,7 +1,8 @@
 import { constants as fsConstants, createReadStream, createWriteStream } from 'node:fs'
-import { access, appendFile, mkdir, readFile, readdir, rename, stat, statfs, unlink, writeFile } from 'node:fs/promises'
+import { access, appendFile, mkdir, open, readFile, readdir, readlink, rename, stat, statfs, unlink, writeFile } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
+import { homedir } from 'node:os'
 import path from 'node:path'
 import { Readable, Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
@@ -25,15 +26,22 @@ try {
   if (error?.code !== 'ENOENT') console.warn(`环境配置读取失败: ${error.message}`)
 }
 const configuredComfyUrl = process.env.COMFYUI_URL || savedEnvironmentConfig.comfyUrl || 'http://127.0.0.1:12234'
-const comfyUrl = configuredComfyUrl.replace(/\/+$/, '')
+const comfyUrlLocked = Boolean(process.env.COMFYUI_URL)
+let comfyUrl = configuredComfyUrl.replace(/\/+$/, '')
 const configuredServiceName = process.env.COMFYUI_SERVICE_NAME || savedEnvironmentConfig.comfyServiceName || 'comfyui.service'
 const comfyServiceName = /^[a-zA-Z0-9_.@-]+$/.test(configuredServiceName) ? configuredServiceName : 'comfyui.service'
 const configuredServiceScope = process.env.COMFYUI_SERVICE_SCOPE || savedEnvironmentConfig.comfyServiceScope || 'system'
 const comfyServiceScope = configuredServiceScope === 'user' ? 'user' : 'system'
+let comfyRoot = process.env.COMFYUI_ROOT || savedEnvironmentConfig.comfyRoot || ''
+let comfyPython = process.env.COMFYUI_PYTHON || savedEnvironmentConfig.comfyPython || ''
+let comfyStartScript = process.env.COMFYUI_START_SCRIPT || savedEnvironmentConfig.comfyStartScript || ''
+let comfyLaunchMode = savedEnvironmentConfig.comfyLaunchMode || ''
+let comfyManagedPid = Number(savedEnvironmentConfig.comfyManagedPid || 0) || 0
 const serviceControlEnabled = process.env.H3_ALLOW_SERVICE_CONTROL === '1'
 const serviceControlUseSudo = process.env.H3_SERVICE_CONTROL_USE_SUDO === '1'
 const autoStartComfy = process.env.H3_AUTO_START_COMFYUI !== '0'
 const maxUploadBytes = Number(process.env.H3_MAX_UPLOAD_BYTES || 4 * 1024 * 1024 * 1024)
+const comfyManagerLogPath = path.join(logRoot, 'comfy-manager.log')
 const startedAt = new Date().toISOString()
 
 await Promise.all([storageRoot, dataRoot, logRoot].map((directory) => mkdir(directory, { recursive: true })))
@@ -57,6 +65,7 @@ const dimensions = {
 
 let jobs = []
 let persistChain = Promise.resolve()
+let comfyControlChain = Promise.resolve()
 let shuttingDown = false
 
 async function log(level, event, details = {}) {
@@ -87,7 +96,17 @@ function persistEnvironmentConfig(patch = {}) {
 }
 
 async function rememberComfyConfig(source) {
-  await persistEnvironmentConfig({ comfyUrl, comfyServiceName, comfyServiceScope, source })
+  await persistEnvironmentConfig({
+    comfyUrl,
+    comfyServiceName,
+    comfyServiceScope,
+    comfyRoot: comfyRoot || null,
+    comfyPython: comfyPython || null,
+    comfyStartScript: comfyStartScript || null,
+    comfyLaunchMode: comfyLaunchMode || null,
+    comfyManagedPid: comfyManagedPid || null,
+    source,
+  })
 }
 
 function persistJobs() {
@@ -178,12 +197,165 @@ async function listStorage(relativePath) {
   return { path: relativePath || '', items, storage: { total, free, used: Math.max(0, total - free) } }
 }
 
-async function comfyStatus(timeout = 2500) {
-  const response = await fetch(`${comfyUrl}/system_stats`, { signal: AbortSignal.timeout(timeout) })
+async function probeComfyUrl(target, timeout = 1200) {
+  const response = await fetch(`${target}/system_stats`, { signal: AbortSignal.timeout(timeout) })
   if (!response.ok) throw new Error(`ComfyUI 状态异常 (${response.status})`)
   const data = await response.json()
   const device = Array.isArray(data.devices) ? data.devices[0] : undefined
-  return { connected: true, device: device?.name || 'ComfyUI 运行中', vramTotal: device?.vram_total, vramFree: device?.vram_free }
+  return { connected: true, url: target, device: device?.name || 'ComfyUI 运行中', vramTotal: device?.vram_total, vramFree: device?.vram_free }
+}
+
+function portFromArgs(args, fallback = 8188) {
+  const inline = args.find((value) => value.startsWith('--port='))
+  const index = args.indexOf('--port')
+  const value = inline ? inline.slice(7) : index >= 0 ? args[index + 1] : fallback
+  const parsed = Number.parseInt(value, 10)
+  return Number.isInteger(parsed) && parsed > 0 && parsed < 65536 ? parsed : fallback
+}
+
+async function fileExists(target) {
+  if (!target) return false
+  try { return (await stat(target)).isFile() } catch { return false }
+}
+
+async function directoryExists(target) {
+  if (!target) return false
+  try { return (await stat(target)).isDirectory() } catch { return false }
+}
+
+async function inspectComfyProcesses() {
+  if (process.platform !== 'linux') return []
+  const matches = []
+  let entries = []
+  try { entries = await readdir('/proc', { withFileTypes: true }) } catch { return matches }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue
+    try {
+      const args = (await readFile(`/proc/${entry.name}/cmdline`, 'utf8')).split('\0').filter(Boolean)
+      const mainIndex = args.findIndex((value) => path.basename(value) === 'main.py')
+      if (mainIndex < 0) continue
+      const cwd = await readlink(`/proc/${entry.name}/cwd`)
+      const root = path.dirname(path.resolve(cwd, args[mainIndex]))
+      if (!await fileExists(path.join(root, 'main.py'))) continue
+      matches.push({ pid: Number(entry.name), root, python: args[0], port: portFromArgs(args.slice(mainIndex + 1)) })
+    } catch { /* process exited or is not readable */ }
+  }
+  return matches
+}
+
+function cleanShellValue(value) {
+  return String(value || '').trim().replace(/^['"]|['"]$/g, '')
+}
+
+async function inspectStartScript(scriptPath) {
+  if (!await fileExists(scriptPath)) return null
+  try {
+    const content = (await readFile(scriptPath, 'utf8')).slice(0, 128 * 1024)
+    if (!/(^|[\s/])main\.py([\s]|$)/m.test(content)) return null
+    const cdMatch = content.match(/^\s*cd\s+([^\n;&|]+)/m)
+    const pythonMatch = content.match(/^\s*(?:PY|PYTHON)\s*=\s*([^\n]+)$/m)
+    const portMatch = content.match(/--port(?:=|\s+)(\d+)/)
+    const root = cdMatch ? path.resolve(path.dirname(scriptPath), cleanShellValue(cdMatch[1])) : ''
+    const python = pythonMatch ? cleanShellValue(pythonMatch[1]) : ''
+    return {
+      script: path.resolve(scriptPath),
+      root: await fileExists(path.join(root, 'main.py')) ? root : '',
+      python: await fileExists(python) ? python : '',
+      port: portMatch ? Number.parseInt(portMatch[1], 10) : 8188,
+    }
+  } catch { return null }
+}
+
+async function scanComfyLocations() {
+  const roots = new Set([
+    homedir(),
+    path.dirname(projectRoot),
+    '/opt',
+    '/srv',
+    '/workspace',
+    '/app',
+    ...String(process.env.H3_COMFYUI_SEARCH_ROOTS || '').split(path.delimiter),
+  ].filter(Boolean).map((value) => path.resolve(value)))
+  if (comfyRoot) roots.add(path.dirname(path.resolve(comfyRoot)))
+  if (comfyStartScript) roots.add(path.dirname(path.resolve(comfyStartScript)))
+  const ignored = new Set(['.cache', '.git', '.npm', '.conda', 'node_modules', 'models', 'output', 'input', 'temp', 'venv', '.venv'])
+  const locations = { roots: [], scripts: [] }
+  let visited = 0
+  for (const searchRoot of roots) {
+    if (!await directoryExists(searchRoot)) continue
+    const queue = [{ directory: searchRoot, depth: 0 }]
+    while (queue.length && visited < 4000) {
+      const current = queue.shift()
+      visited += 1
+      let entries = []
+      try { entries = await readdir(current.directory, { withFileTypes: true }) } catch { continue }
+      if (entries.some((entry) => entry.isFile() && entry.name === 'main.py') && entries.some((entry) => entry.isDirectory() && entry.name === 'comfy')) {
+        locations.roots.push(current.directory)
+        continue
+      }
+      for (const entry of entries) {
+        const target = path.join(current.directory, entry.name)
+        if (entry.isFile() && /^(?:start[-_])?comfy(?:ui)?[^/]*\.(?:sh|bat|cmd)$/i.test(entry.name)) locations.scripts.push(target)
+        if (entry.isDirectory() && current.depth < 4 && !ignored.has(entry.name) && !entry.name.startsWith('.')) queue.push({ directory: target, depth: current.depth + 1 })
+      }
+    }
+  }
+  return { roots: [...new Set(locations.roots)], scripts: [...new Set(locations.scripts)] }
+}
+
+async function discoverComfyEnvironment({ persist = true } = {}) {
+  const processes = await inspectComfyProcesses()
+  const urls = []
+  for (const item of processes) urls.push(`http://127.0.0.1:${item.port}`)
+  urls.push(comfyUrl)
+  if (!comfyUrlLocked) {
+    const discoveryPorts = String(process.env.H3_COMFYUI_DISCOVERY_PORTS || '8188,12234,30010,51250')
+      .split(',').map((value) => Number.parseInt(value.trim(), 10)).filter((value) => value > 0 && value < 65536)
+    for (const candidatePort of discoveryPorts) urls.push(`http://127.0.0.1:${candidatePort}`)
+  }
+  for (const target of [...new Set(urls)]) {
+    try {
+      const status = await probeComfyUrl(target, 900)
+      const matched = processes.find((item) => item.port === Number(new URL(target).port || 80))
+      comfyUrl = target
+      if (matched) {
+        comfyRoot = matched.root
+        comfyPython = matched.python
+        comfyManagedPid = matched.pid
+        comfyLaunchMode = 'process'
+      }
+      if (persist) await rememberComfyConfig(matched ? 'process-discovery' : 'port-discovery')
+      return { ...status, discovered: true, root: comfyRoot || null, launchMode: comfyLaunchMode || null }
+    } catch { /* try the next local candidate */ }
+  }
+
+  const locations = await scanComfyLocations()
+  const scripts = []
+  for (const scriptPath of [comfyStartScript, ...locations.scripts].filter(Boolean)) {
+    const inspected = await inspectStartScript(scriptPath)
+    if (inspected) scripts.push(inspected)
+  }
+  const script = scripts.find((item) => item.root) || scripts[0]
+  if (script) {
+    comfyStartScript = script.script
+    if (script.root) comfyRoot = script.root
+    if (script.python) comfyPython = script.python
+    if (!comfyUrlLocked) comfyUrl = `http://127.0.0.1:${script.port}`
+    comfyLaunchMode = 'script'
+  } else if (!comfyRoot && locations.roots[0]) {
+    comfyRoot = locations.roots[0]
+    comfyLaunchMode = 'direct'
+  }
+  if (persist && (comfyRoot || comfyStartScript)) await rememberComfyConfig('filesystem-discovery')
+  return { connected: false, discovered: Boolean(comfyRoot || comfyStartScript), url: comfyUrl, root: comfyRoot || null, startScript: comfyStartScript || null, launchMode: comfyLaunchMode || null }
+}
+
+async function comfyStatus(timeout = 2500) {
+  try { return await probeComfyUrl(comfyUrl, timeout) } catch {
+    const discovered = await discoverComfyEnvironment()
+    if (discovered.connected) return discovered
+    throw new Error(`未找到运行中的 ComfyUI（已检查 ${comfyUrl} 和本机进程）`)
+  }
 }
 
 function runProcess(command, args, timeout = 5000) {
@@ -205,37 +377,142 @@ function runProcess(command, args, timeout = 5000) {
   })
 }
 
-async function controlComfyService(action) {
-  if (!['start', 'restart', 'stop'].includes(action)) throw new Error('不支持的服务操作')
-  if (!serviceControlEnabled) throw new Error('服务控制尚未启用，请设置 H3_ALLOW_SERVICE_CONTROL=1')
-  if (process.platform !== 'linux') throw new Error('服务控制仅在 Linux systemd 环境可用')
+async function systemdServiceAvailable() {
+  if (process.platform !== 'linux' || !await directoryExists('/run/systemd/system')) return false
+  const args = [...(comfyServiceScope === 'user' ? ['--user'] : []), 'show', comfyServiceName, '--property=LoadState', '--value']
+  const result = await runProcess('systemctl', args, 4000)
+  return result.ok && result.output.trim() === 'loaded'
+}
+
+async function controlSystemdComfy(action) {
+  if (!serviceControlEnabled) throw new Error('systemd 服务控制尚未启用，请设置 H3_ALLOW_SERVICE_CONTROL=1')
   const systemctlArgs = [...(comfyServiceScope === 'user' ? ['--user'] : []), action, comfyServiceName]
   const result = serviceControlUseSudo && comfyServiceScope === 'system'
     ? await runProcess('sudo', ['-n', 'systemctl', ...systemctlArgs], 30000)
     : await runProcess('systemctl', systemctlArgs, 30000)
   if (!result.ok) throw new Error(result.error || result.output || `ComfyUI ${action} 失败`)
+  comfyLaunchMode = 'systemd'
   await log('info', 'comfy_service_control', { action, service: comfyServiceName, scope: comfyServiceScope })
   return { type: 'success', text: `ComfyUI 已执行 ${action}`, time: new Date().toISOString() }
 }
 
+async function resolveComfyPython() {
+  const candidates = [
+    comfyPython,
+    comfyRoot && path.join(comfyRoot, '.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python'),
+    comfyRoot && path.join(comfyRoot, 'venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python'),
+    process.env.PYTHON,
+    process.platform === 'win32' ? 'python' : 'python3',
+  ].filter(Boolean)
+  for (const candidate of [...new Set(candidates)]) {
+    if (path.isAbsolute(candidate) && !await fileExists(candidate)) continue
+    const result = await runProcess(candidate, ['--version'], 5000)
+    if (result.ok) return candidate
+  }
+  throw new Error('已找到 ComfyUI，但没有可用的 Python；请设置 COMFYUI_PYTHON')
+}
+
+async function launchDetached(command, args, cwd) {
+  const output = await open(comfyManagerLogPath, 'a')
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd,
+      detached: process.platform !== 'win32',
+      stdio: ['ignore', output.fd, output.fd],
+      windowsHide: true,
+      shell: false,
+      env: { ...process.env, PYTHONUNBUFFERED: '1' },
+    })
+    child.once('error', (error) => { void output.close(); reject(error) })
+    child.once('spawn', () => {
+      comfyManagedPid = child.pid || 0
+      child.unref()
+      void output.close()
+      resolve(child.pid)
+    })
+  })
+}
+
+async function startManagedComfy() {
+  await discoverComfyEnvironment()
+  if (serviceControlEnabled && await systemdServiceAvailable()) return controlSystemdComfy('start')
+  if (comfyStartScript && await fileExists(comfyStartScript)) {
+    const command = process.platform === 'win32' ? comfyStartScript : 'bash'
+    const args = process.platform === 'win32' ? [] : [comfyStartScript]
+    await launchDetached(command, args, path.dirname(comfyStartScript))
+    comfyLaunchMode = 'script'
+    await rememberComfyConfig('script-started')
+    await log('info', 'comfy_script_started', { script: comfyStartScript, pid: comfyManagedPid, url: comfyUrl })
+    return { type: 'success', text: `已通过发现的启动脚本拉起 ComfyUI（${comfyStartScript}）`, time: new Date().toISOString() }
+  }
+  if (!comfyRoot || !await fileExists(path.join(comfyRoot, 'main.py'))) {
+    throw new Error('未发现 ComfyUI 安装目录；可设置 COMFYUI_ROOT，或先运行一键安装脚本')
+  }
+  comfyPython = await resolveComfyPython()
+  const parsedUrl = new URL(comfyUrl)
+  const comfyPort = Number.parseInt(parsedUrl.port, 10) || 8188
+  const listenAddress = process.env.H3_COMFYUI_LISTEN || '0.0.0.0'
+  await launchDetached(comfyPython, ['main.py', '--listen', listenAddress, '--port', String(comfyPort)], comfyRoot)
+  comfyLaunchMode = 'direct'
+  await rememberComfyConfig('direct-started')
+  await log('info', 'comfy_direct_started', { root: comfyRoot, python: comfyPython, pid: comfyManagedPid, url: comfyUrl })
+  return { type: 'success', text: `已从自动发现的目录启动 ComfyUI（${comfyRoot}）`, time: new Date().toISOString() }
+}
+
+async function stopManagedComfy() {
+  if (serviceControlEnabled && await systemdServiceAvailable() && comfyLaunchMode === 'systemd') return controlSystemdComfy('stop')
+  const processes = await inspectComfyProcesses()
+  const targetPort = Number.parseInt(new URL(comfyUrl).port, 10) || 8188
+  const targets = processes.filter((item) => (comfyRoot && path.resolve(item.root) === path.resolve(comfyRoot)) || item.port === targetPort)
+  if (!targets.length) return { type: 'info', text: 'ComfyUI 当前没有运行', time: new Date().toISOString() }
+  for (const item of targets) {
+    try { process.kill(item.pid, 'SIGTERM') } catch (error) { if (error?.code !== 'ESRCH') throw error }
+  }
+  comfyManagedPid = 0
+  await rememberComfyConfig('stopped')
+  await log('info', 'comfy_process_stopped', { pids: targets.map((item) => item.pid), root: comfyRoot, url: comfyUrl })
+  return { type: 'success', text: `ComfyUI 已停止（${targets.length} 个进程）`, time: new Date().toISOString() }
+}
+
+async function executeComfyControl(action) {
+  if (!['start', 'restart', 'stop'].includes(action)) throw new Error('不支持的服务操作')
+  if (action === 'stop') return stopManagedComfy()
+  if (action === 'restart') {
+    await stopManagedComfy()
+    await new Promise((resolve) => setTimeout(resolve, 1200))
+  }
+  try {
+    await comfyStatus(1000)
+    return { type: 'success', text: 'ComfyUI 已在运行', time: new Date().toISOString() }
+  } catch {
+    const started = await startManagedComfy()
+    for (let attempt = 0; attempt < 45; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1000))
+      try {
+        await probeComfyUrl(comfyUrl, 1500)
+        await rememberComfyConfig('started-and-connected')
+        return { ...started, text: `${started.text}，已经连接并保存配置` }
+      } catch { /* keep waiting for the discovered service */ }
+    }
+    return { type: 'warning', text: `${started.text}，但 45 秒内尚未响应，请查看 comfy-logs`, time: new Date().toISOString() }
+  }
+}
+
+function controlComfyService(action) {
+  const operation = comfyControlChain.catch(() => undefined).then(() => executeComfyControl(action))
+  comfyControlChain = operation.then(() => undefined, () => undefined)
+  return operation
+}
+
 async function autoStartComfyService() {
-  if (!autoStartComfy || process.platform !== 'linux') return { type: 'info', text: '当前环境未启用自动启动', time: new Date().toISOString() }
+  if (!autoStartComfy) return { type: 'info', text: '当前环境未启用自动启动', time: new Date().toISOString() }
   try {
     await comfyStatus(1200)
     await rememberComfyConfig('connected')
     return { type: 'success', text: 'ComfyUI 已在运行，配置已保存', time: new Date().toISOString() }
   } catch {
     try {
-      const started = await controlComfyService('start')
-      for (let attempt = 0; attempt < 12; attempt += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 1000))
-        try {
-          await comfyStatus(1500)
-          await rememberComfyConfig('auto-started')
-          return { ...started, text: 'ComfyUI 已自动启动并连接，配置已保存' }
-        } catch { /* keep waiting for the service */ }
-      }
-      return { type: 'warning', text: '已发送 ComfyUI 启动命令，但服务尚未响应', time: new Date().toISOString() }
+      return await controlComfyService('start')
     } catch (error) {
       return { type: 'warning', text: error instanceof Error ? error.message : 'ComfyUI 自动启动失败', time: new Date().toISOString() }
     }
@@ -243,12 +520,13 @@ async function autoStartComfyService() {
 }
 
 async function environmentStatus() {
+  const hasSystemd = process.platform === 'linux' && await directoryExists('/run/systemd/system')
   const [workflow, ffmpeg, service] = await Promise.all([
     workflowAvailable(),
     runProcess('ffmpeg', ['-version'], 3500),
-    process.platform === 'linux'
+    hasSystemd
       ? runProcess('systemctl', ['is-active', 'h3-studio'], 3000)
-      : Promise.resolve({ ok: false, output: '开发模式', error: '' }),
+      : Promise.resolve({ ok: true, output: process.platform === 'linux' ? '容器进程模式' : '开发模式', error: '' }),
   ])
   let comfy = { connected: false }
   try { comfy = await comfyStatus(3000) } catch { /* reported as disconnected */ }
@@ -258,11 +536,11 @@ async function environmentStatus() {
   const freeBytes = Number(disk.bavail * disk.bsize)
   const components = [
     { id: 'web', name: 'H3 网页服务', status: 'ready', detail: `Node ${process.version} · ${host}:${port}` },
-    { id: 'comfy', name: '本机 ComfyUI', status: comfy.connected ? 'ready' : 'missing', detail: comfy.connected ? (comfy.device || comfyUrl) : `未连接 ${comfyUrl}` },
+    { id: 'comfy', name: '本机 ComfyUI', status: comfy.connected ? 'ready' : 'missing', detail: comfy.connected ? `${comfy.device || '运行中'} · ${comfyUrl}` : comfyRoot || comfyStartScript ? `已发现，等待启动 · ${comfyUrl}` : `未发现 · 已检查 ${comfyUrl}` },
     { id: 'workflow', name: 'H3 API 工作流', status: workflow ? 'ready' : 'missing', detail: workflow ? '已载入 768P 工作流' : '等待 h3-api.json' },
     { id: 'ffmpeg', name: 'FFmpeg 视频工具', status: ffmpeg.ok ? 'ready' : 'missing', detail: ffmpeg.ok ? (ffmpeg.output.split('\n')[0] || '可用') : '未检测到 FFmpeg' },
     { id: 'storage', name: '服务器文件空间', status: storageWritable ? 'ready' : 'missing', detail: storageWritable ? `可读写 · 剩余 ${Math.round(freeBytes / 1024 / 1024 / 1024)} GB` : '目录不可写' },
-    { id: 'service', name: '常驻守护服务', status: process.platform !== 'linux' ? 'development' : service.ok ? 'ready' : 'attention', detail: process.platform !== 'linux' ? '当前为开发模式' : service.ok ? 'systemd 正在守护' : '等待启用 h3-studio.service' },
+    { id: 'service', name: '运行方式', status: process.platform !== 'linux' ? 'development' : service.ok ? 'ready' : 'attention', detail: process.platform !== 'linux' ? '当前为开发模式' : hasSystemd ? (service.ok ? 'systemd 正在守护' : '等待启用 h3-studio.service') : '已适配无 systemd 的容器环境' },
   ]
   return {
     ready: comfy.connected && workflow && ffmpeg.ok && storageWritable,
@@ -319,11 +597,15 @@ async function environmentLines(command) {
     } catch { return [line('info', '当前还没有运行日志')] }
   }
   if (normalized === 'comfy-logs') {
-    if (process.platform !== 'linux') return [line('info', '开发环境未连接 systemd；部署到服务器后显示 ComfyUI 日志')]
-    const args = [...(comfyServiceScope === 'user' ? ['--user'] : []), '-u', comfyServiceName, '-n', '80', '--no-pager', '--output=short-iso']
-    const result = await runProcess('journalctl', args, 7000)
-    if (!result.ok) return [line('warning', result.error || '暂时无法读取 ComfyUI 服务日志')]
-    return (result.output || 'ComfyUI 暂无日志').split('\n').map((entry) => line('info', entry))
+    if (serviceControlEnabled && await systemdServiceAvailable()) {
+      const args = [...(comfyServiceScope === 'user' ? ['--user'] : []), '-u', comfyServiceName, '-n', '80', '--no-pager', '--output=short-iso']
+      const result = await runProcess('journalctl', args, 7000)
+      if (result.ok) return (result.output || 'ComfyUI 暂无日志').split('\n').map((entry) => line('info', entry))
+    }
+    try {
+      const content = await readFile(comfyManagerLogPath, 'utf8')
+      return content.trim().split('\n').slice(-80).map((entry) => line('info', entry))
+    } catch { return [line('info', 'ComfyUI 暂无启动日志')] }
   }
   return [line('error', `不支持命令“${normalized || '(空)'}”`), line('info', '输入 help 查看可用命令')]
 }
@@ -468,9 +750,18 @@ async function handleApi(req, res, url) {
       comfyUrl,
       comfyServiceName,
       comfyServiceScope,
+      comfyRoot: comfyRoot || null,
+      comfyPython: comfyPython || null,
+      comfyStartScript: comfyStartScript || null,
+      comfyLaunchMode: comfyLaunchMode || null,
       autoStartComfy,
       savedAt: savedEnvironmentConfig.updatedAt || null,
     })
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/environment/discover') {
+    const discovery = await discoverComfyEnvironment()
+    return json(res, 200, { discovery, status: await environmentStatus() })
   }
 
   if (req.method === 'POST' && url.pathname === '/api/environment/prepare') {

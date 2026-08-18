@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PROJECT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
+RUN_USER=${H3_RUN_USER:-$(id -un)}
+RUNTIME_ROOT=${H3_RUNTIME_ROOT:-"${XDG_DATA_HOME:-$HOME/.local/share}/h3-studio"}
+H3_PORT_VALUE=${H3_PORT:-12233}
+COMFY_PORT_VALUE=${COMFYUI_PORT:-12234}
+INSTALL_COMFY=${H3_INSTALL_COMFYUI:-1}
+
+say() { printf '[H3] %s\n' "$*"; }
+fail() { printf '[H3] %s\n' "$*" >&2; exit 1; }
+
+install_packages() {
+  missing=''
+  command -v git >/dev/null 2>&1 || missing="$missing git"
+  command -v curl >/dev/null 2>&1 || missing="$missing curl"
+  command -v ffmpeg >/dev/null 2>&1 || missing="$missing ffmpeg"
+  command -v python3 >/dev/null 2>&1 || missing="$missing python3 python3-venv"
+  [ -z "$missing" ] && return
+  if [ "$(id -u)" -ne 0 ]; then fail "缺少依赖:$missing；请用 root 运行，或先安装这些软件"; fi
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates $missing
+  elif command -v dnf >/dev/null 2>&1; then dnf install -y $missing
+  elif command -v yum >/dev/null 2>&1; then yum install -y $missing
+  else fail "无法识别系统包管理器，请先安装:$missing"; fi
+}
+
+install_node() {
+  if command -v node >/dev/null 2>&1; then
+    major=$(node -p "Number(process.versions.node.split('.')[0])")
+    [ "$major" -ge 18 ] && command -v npm >/dev/null 2>&1 && return
+  fi
+  [ "$(id -u)" -eq 0 ] || fail '需要 Node.js 18+，请先安装后重试'
+  if command -v apt-get >/dev/null 2>&1; then
+    command -v curl >/dev/null 2>&1 || { apt-get update; apt-get install -y curl ca-certificates; }
+    curl -fsSL https://deb.nodesource.com/setup_20.x -o /tmp/h3-nodesource.sh
+    bash /tmp/h3-nodesource.sh
+    apt-get install -y nodejs
+  else fail '需要 Node.js 18+；当前系统无法自动安装 Node.js'; fi
+}
+
+find_comfy_root() {
+  [ -n "${COMFYUI_ROOT:-}" ] && [ -f "$COMFYUI_ROOT/main.py" ] && { printf '%s\n' "$COMFYUI_ROOT"; return; }
+  for base in "$HOME" /opt /srv /workspace /app; do
+    [ -d "$base" ] || continue
+    candidate=$(find "$base" -maxdepth 5 -type f -name main.py -path '*/ComfyUI/main.py' -print -quit 2>/dev/null || true)
+    [ -n "$candidate" ] && { dirname "$candidate"; return; }
+  done
+}
+
+find_comfy_script() {
+  [ -n "${COMFYUI_START_SCRIPT:-}" ] && [ -f "$COMFYUI_START_SCRIPT" ] && { printf '%s\n' "$COMFYUI_START_SCRIPT"; return; }
+  for base in "$HOME" /opt /srv /workspace /app; do
+    [ -d "$base" ] || continue
+    candidate=$(find "$base" -maxdepth 4 -type f \( -iname 'start_comfy*.sh' -o -iname 'start-comfy*.sh' \) -print -quit 2>/dev/null || true)
+    [ -n "$candidate" ] && { printf '%s\n' "$candidate"; return; }
+  done
+}
+
+install_packages
+install_node
+mkdir -p "$RUNTIME_ROOT" "$RUNTIME_ROOT/data" "$RUNTIME_ROOT/logs" "$RUNTIME_ROOT/storage"
+
+COMFY_ROOT_FOUND=$(find_comfy_root || true)
+COMFY_SCRIPT_FOUND=$(find_comfy_script || true)
+
+if [ -z "$COMFY_ROOT_FOUND" ] && [ "$INSTALL_COMFY" = 1 ]; then
+  COMFY_ROOT_FOUND="$RUNTIME_ROOT/ComfyUI"
+  say "未发现 ComfyUI，安装到可迁移数据目录 $COMFY_ROOT_FOUND"
+  git clone --depth 1 https://github.com/comfyanonymous/ComfyUI.git "$COMFY_ROOT_FOUND"
+  python3 -m venv "$COMFY_ROOT_FOUND/.venv"
+  "$COMFY_ROOT_FOUND/.venv/bin/python" -m pip install --upgrade pip
+  "$COMFY_ROOT_FOUND/.venv/bin/python" -m pip install -r "$COMFY_ROOT_FOUND/requirements.txt"
+fi
+
+[ -n "$COMFY_ROOT_FOUND" ] || fail '没有发现 ComfyUI；请设置 COMFYUI_ROOT，或使用 H3_INSTALL_COMFYUI=1'
+
+COMFY_PYTHON_FOUND=''
+for candidate in "${COMFYUI_PYTHON:-}" "$COMFY_ROOT_FOUND/.venv/bin/python" "$COMFY_ROOT_FOUND/venv/bin/python"; do
+  [ -n "$candidate" ] && [ -x "$candidate" ] && { COMFY_PYTHON_FOUND=$candidate; break; }
+done
+
+if [ -n "$COMFY_SCRIPT_FOUND" ]; then
+  script_port=$(sed -nE 's/.*--port[= ]+([0-9]+).*/\1/p' "$COMFY_SCRIPT_FOUND" | tail -n 1)
+  [ -n "$script_port" ] && COMFY_PORT_VALUE=$script_port
+fi
+
+say '安装网页依赖并构建'
+cd "$PROJECT_DIR"
+npm install --no-audit --no-fund
+npm run build
+
+quote_env() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+{
+  printf 'NODE_ENV=production\n'
+  printf 'H3_HOST=0.0.0.0\n'
+  printf 'H3_PORT=%s\n' "$H3_PORT_VALUE"
+  printf 'H3_AUTO_START_COMFYUI=1\n'
+  printf 'H3_STORAGE_ROOT="%s"\n' "$(quote_env "$RUNTIME_ROOT/storage")"
+  printf 'H3_DATA_ROOT="%s"\n' "$(quote_env "$RUNTIME_ROOT/data")"
+  printf 'H3_LOG_ROOT="%s"\n' "$(quote_env "$RUNTIME_ROOT/logs")"
+  printf 'H3_WORKFLOW_PATH="%s"\n' "$(quote_env "$PROJECT_DIR/workflows/h3-api.json")"
+  printf 'COMFYUI_URL=http://127.0.0.1:%s\n' "$COMFY_PORT_VALUE"
+  printf 'COMFYUI_ROOT="%s"\n' "$(quote_env "$COMFY_ROOT_FOUND")"
+  [ -n "$COMFY_PYTHON_FOUND" ] && printf 'COMFYUI_PYTHON="%s"\n' "$(quote_env "$COMFY_PYTHON_FOUND")"
+  [ -n "$COMFY_SCRIPT_FOUND" ] && printf 'COMFYUI_START_SCRIPT="%s"\n' "$(quote_env "$COMFY_SCRIPT_FOUND")"
+} >"$PROJECT_DIR/.h3.env"
+chmod 600 "$PROJECT_DIR/.h3.env"
+chmod +x "$SCRIPT_DIR/h3ctl.sh" "$SCRIPT_DIR/h3-supervisor.sh" "$SCRIPT_DIR/install.sh"
+
+if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1 && [ "$(id -u)" -eq 0 ]; then
+  NODE_BIN=$(command -v node)
+  cat >/etc/systemd/system/h3-studio.service <<EOF
+[Unit]
+Description=H3 Studio
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=$RUN_USER
+WorkingDirectory=$PROJECT_DIR
+EnvironmentFile=$PROJECT_DIR/.h3.env
+ExecStart=$NODE_BIN $PROJECT_DIR/server.mjs
+Restart=always
+RestartSec=3
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  systemctl enable --now h3-studio.service
+  say '已注册 systemd 守护服务'
+else
+  "$SCRIPT_DIR/h3ctl.sh" restart
+  say '当前环境没有 systemd，已启用内置守护进程'
+fi
+
+say "部署完成：打开 http://服务器IP:$H3_PORT_VALUE"
+say "ComfyUI 已识别：$COMFY_ROOT_FOUND（端口 $COMFY_PORT_VALUE）"
