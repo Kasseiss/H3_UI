@@ -92,6 +92,36 @@ type Thread = {
   accent: string
 }
 
+type UserTask = {
+  id: string
+  title: string
+  prompt: string
+  aspect: string
+  duration: number
+  status: GenerationStatus
+  progress: number
+  videoUrl?: string
+  videoName?: string
+  createdAt: string
+  jobId?: string
+  error?: string
+  samplingSteps?: number
+  currentStep?: number
+}
+
+const TASKS_STORAGE_KEY = 'h3-user-tasks'
+
+function loadUserTasks(userId: string): UserTask[] {
+  try {
+    const data = localStorage.getItem(`${TASKS_STORAGE_KEY}-${userId}`)
+    return data ? JSON.parse(data) : []
+  } catch { return [] }
+}
+
+function saveUserTasks(userId: string, tasks: UserTask[]) {
+  localStorage.setItem(`${TASKS_STORAGE_KEY}-${userId}`, JSON.stringify(tasks))
+}
+
 type DriveItem = {
   id: string
   name: string
@@ -318,6 +348,8 @@ function App() {
   const [comfyStatus, setComfyStatus] = useState<ComfyStatus>({ connected: false })
   const [toast, setToast] = useState('')
   const [toastLeaving, setToastLeaving] = useState(false)
+  const [userTasks, setUserTasks] = useState<UserTask[]>([])
+  const [deleteConfirm, setDeleteConfirm] = useState<{ taskId: string; deleteVideos: boolean } | null>(null)
   const toastTimersRef = useRef<number[]>([])
   const materialInputRef = useRef<HTMLInputElement>(null)
   const driveInputRef = useRef<HTMLInputElement>(null)
@@ -325,6 +357,18 @@ function App() {
   useEffect(() => {
     fetch('/api/auth/me').then(async (response) => response.ok ? (await response.json()).account as Account : null).then(setAccount).catch(() => setAccount(null))
   }, [])
+
+  useEffect(() => {
+    if (account?.id) {
+      setUserTasks(loadUserTasks(account.id))
+    }
+  }, [account?.id])
+
+  useEffect(() => {
+    if (account?.id) {
+      saveUserTasks(account.id, userTasks)
+    }
+  }, [userTasks, account?.id])
 
   const activeMessages = messages[activeThread] ?? []
   const activeTitle = threads.find((thread) => thread.id === activeThread)?.title ?? '未命名创作'
@@ -361,29 +405,44 @@ function App() {
         const data = await responseJson<{ jobs: ServerJob[] }>(await fetch('/api/generations'))
         if (cancelled) return
         nextDelay = data.jobs.some((job) => ['queued', 'generating'].includes(job.status)) ? 4000 : 30000
-        const ordered = [...data.jobs].reverse()
-        setMessages((current) => {
-          const next = { ...current }
-          for (const job of ordered) {
-            const conversation = [...(next[job.conversationId] ?? [])]
-            const assistantIndex = conversation.findIndex((message) => message.jobId === job.id)
-            const assistant = serverMessage(job)
-            if (assistantIndex >= 0) {
-              conversation[assistantIndex] = { ...conversation[assistantIndex], ...assistant }
+
+        setUserTasks((current) => {
+          const next = [...current]
+          for (const job of data.jobs) {
+            const existingIndex = next.findIndex((t) => t.jobId === job.id)
+            const videoUrl = job.outputs?.find((output) => ['videos', 'gifs'].includes(output.kind))?.url ?? job.outputs?.[0]?.url
+            if (existingIndex >= 0) {
+              next[existingIndex] = {
+                ...next[existingIndex],
+                status: job.status,
+                progress: job.progress,
+                error: job.error,
+                videoUrl: videoUrl || next[existingIndex].videoUrl,
+                samplingSteps: job.samplingSteps,
+                currentStep: job.currentStep,
+              }
             } else {
-              conversation.push({
-                id: `user-${job.id}`,
-                role: 'user',
+              next.unshift({
+                id: `task-${job.id}`,
+                title: shortTitle(job.prompt),
                 prompt: job.prompt,
                 aspect: job.aspect,
                 duration: job.duration,
-                createdAt: '已恢复',
-              }, assistant)
+                status: job.status,
+                progress: job.progress,
+                videoUrl,
+                videoName: `${job.id}.mp4`,
+                createdAt: new Date(job.createdAt).toLocaleString('zh-CN'),
+                jobId: job.id,
+                error: job.error,
+                samplingSteps: job.samplingSteps,
+                currentStep: job.currentStep,
+              })
             }
-            next[job.conversationId] = conversation
           }
           return next
         })
+
         setThreads((current) => {
           const next = [...current]
           for (const job of data.jobs) {
@@ -717,6 +776,60 @@ function App() {
     showToast('任务已删除')
   }
 
+  const deleteTask = async (taskId: string, deleteVideos: boolean) => {
+    const task = userTasks.find((t) => t.id === taskId)
+    if (!task) return
+
+    if (deleteVideos && task.videoUrl) {
+      try {
+        await fetch(`/api/storage/delete?url=${encodeURIComponent(task.videoUrl)}`, { method: 'DELETE' })
+      } catch { /* 静默处理 */ }
+    }
+
+    if (task.jobId) {
+      try {
+        await fetch(`/api/generations/${encodeURIComponent(task.jobId)}`, { method: 'DELETE' })
+      } catch { /* 静默处理 */ }
+    }
+
+    setUserTasks((current) => current.filter((t) => t.id !== taskId))
+    showToast(deleteVideos ? '任务和视频已删除' : '任务已删除')
+  }
+
+  const deleteAllTasks = async (deleteVideos: boolean) => {
+    for (const task of userTasks) {
+      if (deleteVideos && task.videoUrl) {
+        try {
+          await fetch(`/api/storage/delete?url=${encodeURIComponent(task.videoUrl)}`, { method: 'DELETE' })
+        } catch { /* 静默处理 */ }
+      }
+      if (task.jobId) {
+        try {
+          await fetch(`/api/generations/${encodeURIComponent(task.jobId)}`, { method: 'DELETE' })
+        } catch { /* 静默处理 */ }
+      }
+    }
+    setUserTasks([])
+    showToast(deleteVideos ? '所有任务和视频已删除' : '所有任务已删除')
+  }
+
+  const downloadTaskVideo = async (task: UserTask) => {
+    if (!task.videoUrl) return showToast('这个任务还没有视频')
+    try {
+      const response = await fetch(task.videoUrl)
+      if (!response.ok) throw new Error('视频下载失败')
+      const blob = await response.blob()
+      const link = document.createElement('a')
+      link.href = URL.createObjectURL(blob)
+      link.download = task.videoName || `${task.id}.mp4`
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      window.setTimeout(() => URL.revokeObjectURL(link.href), 1000)
+      showToast('已开始下载视频')
+    } catch (error) { showToast(error instanceof Error ? error.message : '视频下载失败') }
+  }
+
   const filteredDriveItems = useMemo(
     () => driveItems.filter((item) => item.name.toLowerCase().includes(driveSearch.toLowerCase())),
     [driveItems, driveSearch],
@@ -751,6 +864,10 @@ function App() {
         onThreadOpen={openThread}
         onNewThread={createNewThread}
         onDeleteThread={deleteThread}
+        userTasks={userTasks}
+        onDeleteTask={deleteTask}
+        onDeleteAllTasks={deleteAllTasks}
+        onDownloadTask={downloadTaskVideo}
         storageInfo={storageInfo}
         comfyStatus={comfyStatus}
       />
@@ -873,6 +990,10 @@ type SidebarProps = {
   onThreadOpen: (id: string) => void
   onNewThread: () => void
   onDeleteThread: (id: string) => void
+  userTasks: UserTask[]
+  onDeleteTask: (taskId: string, deleteVideos: boolean) => void
+  onDeleteAllTasks: (deleteVideos: boolean) => void
+  onDownloadTask: (task: UserTask) => void
   storageInfo: StorageInfo
   comfyStatus: ComfyStatus
 }
@@ -887,6 +1008,10 @@ function Sidebar({
   onThreadOpen,
   onNewThread,
   onDeleteThread,
+  userTasks,
+  onDeleteTask,
+  onDeleteAllTasks,
+  onDownloadTask,
   storageInfo,
   comfyStatus,
 }: SidebarProps) {
@@ -926,26 +1051,55 @@ function Sidebar({
         </nav>
 
         <div className="sidebar-section-heading">
-          <span>最近任务</span>
-          <button className="icon-button"><Search size={15} /></button>
+          <span>任务列表</span>
+          {userTasks.length > 0 && (
+            <button className="icon-button" title="清空所有任务" onClick={() => {
+              if (confirm('确定要清空所有任务吗？')) {
+                onDeleteAllTasks(false)
+              }
+            }}><Trash2 size={14} /></button>
+          )}
         </div>
         <div className="thread-list">
-          {threads.map((thread) => (
-            <button
-              key={thread.id}
-              className={`thread-item ${activeThread === thread.id && view === 'create' ? 'active' : ''}`}
-              onClick={() => onThreadOpen(thread.id)}
-            >
-              <span className={`thread-icon ${thread.accent}`}><Film size={14} /></span>
-              <span className="thread-copy">
-                <strong>{thread.title}</strong>
-                <small>{thread.meta}</small>
-              </span>
-              <span className="thread-actions">
-                <Trash2 className="thread-delete" size={14} onClick={(e) => { e.stopPropagation(); onDeleteThread(thread.id) }} />
-              </span>
-            </button>
-          ))}
+          {userTasks.length === 0 ? (
+            <div className="empty-tasks-hint">
+              <Film size={20} />
+              <span>暂无任务</span>
+            </div>
+          ) : (
+            userTasks.map((task) => (
+              <div
+                key={task.id}
+                className={`task-item ${task.status === 'generating' ? 'active' : ''}`}
+              >
+                <span className={`thread-icon ${task.status === 'done' ? 'green' : task.status === 'failed' ? 'orange' : 'blue'}`}>
+                  {task.status === 'done' ? <Check size={14} /> : task.status === 'generating' ? <Sparkles size={14} /> : <Film size={14} />}
+                </span>
+                <span className="thread-copy">
+                  <strong>{task.title}</strong>
+                  <small>{task.status === 'done' ? '已完成' : task.status === 'generating' ? `生成中 ${task.progress}%` : task.status === 'failed' ? '失败' : '排队中'}</small>
+                </span>
+                <span className="thread-actions">
+                  {task.videoUrl && (
+                    <button className="task-action-btn" title="下载视频" onClick={(e) => { e.stopPropagation(); onDownloadTask(task) }}>
+                      <Download size={12} />
+                    </button>
+                  )}
+                  <button className="task-action-btn delete" title="删除任务" onClick={(e) => {
+                    e.stopPropagation()
+                    if (task.videoUrl) {
+                      const shouldDeleteVideos = confirm('是否同时删除该任务的视频文件？')
+                      onDeleteTask(task.id, shouldDeleteVideos)
+                    } else {
+                      onDeleteTask(task.id, false)
+                    }
+                  }}>
+                    <Trash2 size={12} />
+                  </button>
+                </span>
+              </div>
+            ))
+          )}
         </div>
 
         <div className="sidebar-bottom">

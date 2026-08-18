@@ -370,6 +370,67 @@ select:focus-visible {
   background: #fff0f0;
 }
 
+.empty-tasks-hint {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 30px 20px;
+  color: #b0b0b6;
+  gap: 8px;
+}
+
+.empty-tasks-hint span {
+  font-size: 11px;
+}
+
+.task-item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 51px;
+  padding: 7px 8px;
+  cursor: pointer;
+  text-align: left;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  gap: 9px;
+  transition: background 140ms ease;
+}
+
+.task-item:hover {
+  background: #f1f1ef;
+}
+
+.task-item.active {
+  background: #ececeb;
+}
+
+.task-action-btn {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  cursor: pointer;
+  color: #8b8b91;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  place-items: center;
+  transition: 140ms ease;
+}
+
+.task-action-btn:hover {
+  color: #5556c4;
+  background: #f0efff;
+}
+
+.task-action-btn.delete:hover {
+  color: #d4545c;
+  background: #fff0f0;
+}
+
 .sidebar-bottom {
   padding-top: 10px;
   border-top: 1px solid var(--line);
