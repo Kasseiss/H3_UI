@@ -410,8 +410,8 @@ function App() {
           const next = [...current]
           for (const job of data.jobs) {
             const existingIndex = next.findIndex((t) => t.jobId === job.id)
-            const videoUrl = job.outputs?.find((output) => ['videos', 'gifs'].includes(output.kind))?.url ?? job.outputs?.[0]?.url
             if (existingIndex >= 0) {
+              const videoUrl = job.outputs?.find((output) => ['videos', 'gifs'].includes(output.kind))?.url ?? job.outputs?.[0]?.url
               next[existingIndex] = {
                 ...next[existingIndex],
                 status: job.status,
@@ -421,35 +421,7 @@ function App() {
                 samplingSteps: job.samplingSteps,
                 currentStep: job.currentStep,
               }
-            } else {
-              next.unshift({
-                id: `task-${job.id}`,
-                title: shortTitle(job.prompt),
-                prompt: job.prompt,
-                aspect: job.aspect,
-                duration: job.duration,
-                status: job.status,
-                progress: job.progress,
-                videoUrl,
-                videoName: `${job.id}.mp4`,
-                createdAt: new Date(job.createdAt).toLocaleString('zh-CN'),
-                jobId: job.id,
-                error: job.error,
-                samplingSteps: job.samplingSteps,
-                currentStep: job.currentStep,
-              })
             }
-          }
-          return next
-        })
-
-        setThreads((current) => {
-          const next = [...current]
-          for (const job of data.jobs) {
-            const index = next.findIndex((thread) => thread.id === job.conversationId)
-            const patch = { title: shortTitle(job.prompt), meta: job.status === 'done' ? '已完成' : job.status === 'failed' ? '需要处理' : '生成中' }
-            if (index >= 0) next[index] = { ...next[index], ...patch }
-            else next.push({ id: job.conversationId, ...patch, accent: 'blue' })
           }
           return next
         })
@@ -637,6 +609,21 @@ function App() {
       }))
       patchMessage(threadId, assistantId, { ...serverMessage(data.job), id: assistantId })
       setThreads((current) => current.map((thread) => thread.id === threadId ? { ...thread, meta: '生成中' } : thread))
+      setUserTasks((current) => [{
+        id: `task-${data.job.id}`,
+        title: shortTitle(title),
+        prompt: submittedPrompt,
+        aspect,
+        duration,
+        status: data.job.status,
+        progress: data.job.progress,
+        videoUrl: data.job.outputs?.find((output) => ['videos', 'gifs'].includes(output.kind))?.url ?? data.job.outputs?.[0]?.url,
+        videoName: `${data.job.id}.mp4`,
+        createdAt: new Date().toLocaleString('zh-CN'),
+        jobId: data.job.id,
+        samplingSteps: data.job.samplingSteps,
+        currentStep: data.job.currentStep,
+      }, ...current])
       showToast('任务已安全写入 ComfyUI 队列')
     } catch (error) {
       const message = error instanceof Error ? error.message : '任务提交失败'
