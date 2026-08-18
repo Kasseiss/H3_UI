@@ -94,6 +94,7 @@ type Thread = {
 
 type UserTask = {
   id: string
+  conversationId: string
   title: string
   prompt: string
   aspect: string
@@ -611,6 +612,7 @@ function App() {
       setThreads((current) => current.map((thread) => thread.id === threadId ? { ...thread, meta: '生成中' } : thread))
       setUserTasks((current) => [{
         id: `task-${data.job.id}`,
+        conversationId: threadId,
         title: shortTitle(title),
         prompt: submittedPrompt,
         aspect,
@@ -734,11 +736,11 @@ function App() {
     } catch (error) { showToast(error instanceof Error ? error.message : '视频下载失败') }
   }
 
-  const cancelGeneration = async (jobId: string, _threadId: string, assistantMessageId: string) => {
-    const threadId = activeThread
+  const cancelGeneration = async (jobId: string, threadId: string, assistantMessageId: string) => {
     try {
       await fetch(`/api/generations/${encodeURIComponent(jobId)}`, { method: 'DELETE' })
       patchMessage(threadId, assistantMessageId, { status: 'failed', progress: 0, note: '任务已取消' })
+      setUserTasks((current) => current.map((t) => t.jobId === jobId ? { ...t, status: 'failed', progress: 0, error: '任务已取消' } : t))
       setThreads((current) => current.map((thread) => thread.id === threadId ? { ...thread, meta: '需要处理' } : thread))
       showToast('任务已取消')
     } catch (error) {
@@ -833,6 +835,14 @@ function App() {
     setAccount(null)
   }
 
+  const openTask = (task: UserTask) => {
+    if (task.conversationId) {
+      setActiveThread(task.conversationId)
+    }
+    setView('create')
+    setSidebarOpen(false)
+  }
+
   if (account === undefined) return <div className="auth-loading"><Sparkles size={20} /><span>正在连接 H3 Studio…</span></div>
   if (!account) return <AuthView onAuthenticated={setAccount} />
 
@@ -855,6 +865,7 @@ function App() {
         onDeleteTask={deleteTask}
         onDeleteAllTasks={deleteAllTasks}
         onDownloadTask={downloadTaskVideo}
+        onOpenTask={openTask}
         storageInfo={storageInfo}
         comfyStatus={comfyStatus}
       />
@@ -896,6 +907,7 @@ function App() {
             onSaveGeneration={saveGeneration}
             onCancelGeneration={cancelGeneration}
             onDownloadMessage={downloadMessageVideo}
+            threadId={activeThread}
           />
         )}
 
@@ -981,6 +993,7 @@ type SidebarProps = {
   onDeleteTask: (taskId: string, deleteVideos: boolean) => void
   onDeleteAllTasks: (deleteVideos: boolean) => void
   onDownloadTask: (task: UserTask) => void
+  onOpenTask: (task: UserTask) => void
   storageInfo: StorageInfo
   comfyStatus: ComfyStatus
 }
@@ -999,6 +1012,7 @@ function Sidebar({
   onDeleteTask,
   onDeleteAllTasks,
   onDownloadTask,
+  onOpenTask,
   storageInfo,
   comfyStatus,
 }: SidebarProps) {
@@ -1058,6 +1072,7 @@ function Sidebar({
               <div
                 key={task.id}
                 className={`task-item ${task.status === 'generating' ? 'active' : ''}`}
+                onClick={() => onOpenTask(task)}
               >
                 <span className={`thread-icon ${task.status === 'done' ? 'green' : task.status === 'failed' ? 'orange' : 'blue'}`}>
                   {task.status === 'done' ? <Check size={14} /> : task.status === 'generating' ? <Sparkles size={14} /> : <Film size={14} />}
@@ -1175,6 +1190,7 @@ type CreateViewProps = {
   onSaveGeneration: (message: Message) => void
   onCancelGeneration: (jobId: string, threadId: string, assistantMessageId: string) => void
   onDownloadMessage: (message: Message) => void
+  threadId: string
 }
 
 function CreateView(props: CreateViewProps) {
@@ -1204,6 +1220,7 @@ function CreateView(props: CreateViewProps) {
     onSaveGeneration,
     onCancelGeneration,
     onDownloadMessage,
+    threadId,
   } = props
 
   return (
@@ -1226,7 +1243,7 @@ function CreateView(props: CreateViewProps) {
       )}
 
       <div className={`conversation ${messages.length ? '' : 'empty'}`}>
-        {!messages.length ? <EmptyState onExample={onPromptChange} /> : <MessageList messages={messages} onOpenPreview={onOpenPreview} onSave={onSaveGeneration} onCancel={onCancelGeneration} onDownload={onDownloadMessage} />}
+        {!messages.length ? <EmptyState onExample={onPromptChange} /> : <MessageList messages={messages} onOpenPreview={onOpenPreview} onSave={onSaveGeneration} onCancel={onCancelGeneration} onDownload={onDownloadMessage} threadId={threadId} />}
       </div>
 
       <div className="composer-wrap">
@@ -1353,13 +1370,13 @@ function EmptyState({ onExample }: { onExample: (prompt: string) => void }) {
   )
 }
 
-function MessageList({ messages, onOpenPreview, onSave, onCancel, onDownload }: { messages: Message[]; onOpenPreview: () => void; onSave: (message: Message) => void; onCancel: (jobId: string, threadId: string, assistantMessageId: string) => void; onDownload: (message: Message) => void }) {
+function MessageList({ messages, onOpenPreview, onSave, onCancel, onDownload, threadId }: { messages: Message[]; onOpenPreview: () => void; onSave: (message: Message) => void; onCancel: (jobId: string, threadId: string, assistantMessageId: string) => void; onDownload: (message: Message) => void; threadId: string }) {
   return (
     <div className="message-list">
       {messages.map((message) => message.role === 'user' ? (
         <UserMessage key={message.id} message={message} />
       ) : (
-        <AssistantMessage key={message.id} message={message} onOpenPreview={onOpenPreview} onSave={onSave} onCancel={onCancel} onDownload={onDownload} />
+        <AssistantMessage key={message.id} message={message} onOpenPreview={onOpenPreview} onSave={onSave} onCancel={onCancel} onDownload={onDownload} threadId={threadId} />
       ))}
     </div>
   )
@@ -1387,7 +1404,7 @@ function UserMessage({ message }: { message: Message }) {
   )
 }
 
-function AssistantMessage({ message, onOpenPreview, onSave, onCancel, onDownload }: { message: Message; onOpenPreview: () => void; onSave: (message: Message) => void; onCancel: (jobId: string, threadId: string, assistantMessageId: string) => void; onDownload: (message: Message) => void }) {
+function AssistantMessage({ message, onOpenPreview, onSave, onCancel, onDownload, threadId }: { message: Message; onOpenPreview: () => void; onSave: (message: Message) => void; onCancel: (jobId: string, threadId: string, assistantMessageId: string) => void; onDownload: (message: Message) => void; threadId: string }) {
   const done = message.status === 'done'
   const failed = message.status === 'failed'
   const currentProgress = done ? 100 : Math.min(96, Math.max(8, message.progress ?? 8))
@@ -1421,7 +1438,7 @@ function AssistantMessage({ message, onOpenPreview, onSave, onCancel, onDownload
               <div className="progress-steps">{progressLabels.map((label, index) => <span className={index <= stage ? 'active' : ''} key={label}><i>{index < stage || done && index === 3 ? <Check size={9} /> : index + 1}</i>{label}</span>)}</div>
               <p>{message.note || '任务已持久化，你可以继续提交新的任务。'}</p>
               {message.jobId && (
-                <button className="cancel-generation-button" onClick={() => onCancel(message.jobId!, 'current', message.id)}>
+                <button className="cancel-generation-button" onClick={() => onCancel(message.jobId!, threadId, message.id)}>
                   <Square size={13} />取消任务
                 </button>
               )}
