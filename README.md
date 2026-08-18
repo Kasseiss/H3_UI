@@ -45,6 +45,8 @@ npm run dev
 
 默认连接 `http://127.0.0.1:51250`。可用环境变量覆盖：
 
+你的 ComfyUI 启动服务也需要监听 `51250`，例如启动参数使用 `--port 51250`；否则 H3 页面会显示 ComfyUI 未连接。
+
 ```bash
 COMFYUI_URL=http://127.0.0.1:51250 \
 H3_WORKFLOW_PATH=/opt/h3-studio/workflows/h3-api.json \
