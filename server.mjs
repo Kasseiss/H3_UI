@@ -22,6 +22,7 @@ const comfyServiceName = /^[a-zA-Z0-9_.@-]+$/.test(process.env.COMFYUI_SERVICE_N
 const comfyServiceScope = process.env.COMFYUI_SERVICE_SCOPE === 'user' ? 'user' : 'system'
 const serviceControlEnabled = process.env.H3_ALLOW_SERVICE_CONTROL === '1'
 const serviceControlUseSudo = process.env.H3_SERVICE_CONTROL_USE_SUDO === '1'
+const autoStartComfy = process.env.H3_AUTO_START_COMFYUI !== '0'
 const maxUploadBytes = Number(process.env.H3_MAX_UPLOAD_BYTES || 4 * 1024 * 1024 * 1024)
 const startedAt = new Date().toISOString()
 
@@ -181,6 +182,41 @@ function runProcess(command, args, timeout = 5000) {
   })
 }
 
+async function controlComfyService(action) {
+  if (!['start', 'restart', 'stop'].includes(action)) throw new Error('不支持的服务操作')
+  if (!serviceControlEnabled) throw new Error('服务控制尚未启用，请设置 H3_ALLOW_SERVICE_CONTROL=1')
+  if (process.platform !== 'linux') throw new Error('服务控制仅在 Linux systemd 环境可用')
+  const systemctlArgs = [...(comfyServiceScope === 'user' ? ['--user'] : []), action, comfyServiceName]
+  const result = serviceControlUseSudo && comfyServiceScope === 'system'
+    ? await runProcess('sudo', ['-n', 'systemctl', ...systemctlArgs], 30000)
+    : await runProcess('systemctl', systemctlArgs, 30000)
+  if (!result.ok) throw new Error(result.error || result.output || `ComfyUI ${action} 失败`)
+  await log('info', 'comfy_service_control', { action, service: comfyServiceName, scope: comfyServiceScope })
+  return { type: 'success', text: `ComfyUI 已执行 ${action}`, time: new Date().toISOString() }
+}
+
+async function autoStartComfyService() {
+  if (!autoStartComfy || process.platform !== 'linux') return { type: 'info', text: '当前环境未启用自动启动', time: new Date().toISOString() }
+  try {
+    await comfyStatus(1200)
+    return { type: 'success', text: 'ComfyUI 已在运行，无需启动', time: new Date().toISOString() }
+  } catch {
+    try {
+      const started = await controlComfyService('start')
+      for (let attempt = 0; attempt < 12; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 1000))
+        try {
+          await comfyStatus(1500)
+          return { ...started, text: 'ComfyUI 已自动启动并连接' }
+        } catch { /* keep waiting for the service */ }
+      }
+      return { type: 'warning', text: '已发送 ComfyUI 启动命令，但服务尚未响应', time: new Date().toISOString() }
+    } catch (error) {
+      return { type: 'warning', text: error instanceof Error ? error.message : 'ComfyUI 自动启动失败', time: new Date().toISOString() }
+    }
+  }
+}
+
 async function environmentStatus() {
   const [workflow, ffmpeg, service] = await Promise.all([
     workflowAvailable(),
@@ -228,6 +264,7 @@ async function environmentLines(command) {
     await Promise.all(['上传素材', '生成结果', '模型缓存'].map((name) => mkdir(path.join(storageRoot, name), { recursive: true })))
     const status = await environmentStatus()
     const lines = [line('info', '正在接入本机 H3 运行环境…'), line('success', '运行目录与服务器云盘已准备完成')]
+    if (!status.components.find((component) => component.id === 'comfy' && component.status === 'ready')) lines.push(await autoStartComfyService())
     for (const component of status.components) lines.push(line(component.status === 'ready' ? 'success' : component.status === 'development' ? 'info' : 'warning', `${component.name}  ${component.detail}`))
     lines.push(line(status.ready ? 'success' : 'warning', status.ready ? '环境已就绪，可以提交 H3 任务' : '基础环境已部署，黄色项目处理后即可生成'))
     return lines
@@ -415,19 +452,20 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === 'POST' && url.pathname === '/api/environment/service') {
-    if (!serviceControlEnabled) return json(res, 403, { error: '服务控制尚未启用，请设置 H3_ALLOW_SERVICE_CONTROL=1' })
-    if (process.platform !== 'linux') return json(res, 400, { error: '服务控制仅在 Linux systemd 环境可用' })
     const body = await readJson(req)
     const action = String(body.action || '')
-    if (!['start', 'restart', 'stop'].includes(action)) throw new Error('不支持的服务操作')
-    const systemctlArgs = [...(comfyServiceScope === 'user' ? ['--user'] : []), action, comfyServiceName]
-    const result = serviceControlUseSudo && comfyServiceScope === 'system'
-      ? await runProcess('sudo', ['-n', 'systemctl', ...systemctlArgs], 30000)
-      : await runProcess('systemctl', systemctlArgs, 30000)
-    const lines = [{ type: result.ok ? 'success' : 'error', text: result.ok ? `ComfyUI 已执行 ${action}` : (result.error || result.output || '服务操作失败'), time: new Date().toISOString() }]
-    if (!result.ok) return json(res, 400, { error: lines[0].text, lines })
-    await log('info', 'comfy_service_control', { action, service: comfyServiceName, scope: comfyServiceScope })
-    return json(res, 200, { lines, status: await environmentStatus() })
+    try {
+      const lines = [await controlComfyService(action)]
+      return json(res, 200, { lines, status: await environmentStatus() })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '服务操作失败'
+      return json(res, 400, { error: message, lines: [{ type: 'error', text: message, time: new Date().toISOString() }] })
+    }
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/environment/auto-start') {
+    const line = await autoStartComfyService()
+    return json(res, 200, { lines: [line], status: await environmentStatus() })
   }
 
   if (req.method === 'GET' && url.pathname === '/api/comfy/status') {
@@ -604,6 +642,7 @@ server.requestTimeout = 15 * 60_000
 
 server.listen(port, host, () => {
   void log('info', 'server_started', { url: `http://${host}:${port}`, storageRoot, comfyUrl, workflowPath })
+  if (autoStartComfy) setTimeout(() => void autoStartComfyService(), 1500).unref()
 })
 
 async function shutdown(signal) {

@@ -17,6 +17,7 @@ Environment=COMFYUI_SERVICE_NAME=comfyui.service
 Environment=COMFYUI_SERVICE_SCOPE=system
 Environment=H3_ALLOW_SERVICE_CONTROL=1
 Environment=H3_SERVICE_CONTROL_USE_SUDO=1
+Environment=H3_AUTO_START_COMFYUI=1
 Environment=H3_STORAGE_ROOT=/data/h3-studio
 Environment=H3_DATA_ROOT=/var/lib/h3-studio
 Environment=H3_LOG_ROOT=/var/log/h3-studio

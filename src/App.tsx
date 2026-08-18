@@ -1418,6 +1418,7 @@ function EnvironmentView({ onToast }: { onToast: (message: string) => void }) {
   ])
   const terminalRef = useRef<HTMLDivElement>(null)
   const terminalBootedRef = useRef(false)
+  const autoStartRef = useRef(false)
   const comfyComponent = status?.components.find((component) => component.id === 'comfy')
   const comfyRunning = comfyComponent?.status === 'ready'
 
@@ -1438,6 +1439,10 @@ function EnvironmentView({ onToast }: { onToast: (message: string) => void }) {
     if (!terminalBootedRef.current) {
       terminalBootedRef.current = true
       window.setTimeout(() => void runTerminalCommand('status'), 120)
+    }
+    if (!autoStartRef.current) {
+      autoStartRef.current = true
+      window.setTimeout(() => void autoStartEnvironment(), 320)
     }
     const timer = window.setInterval(() => void refreshStatus(true), 30000)
     return () => window.clearInterval(timer)
@@ -1467,6 +1472,16 @@ function EnvironmentView({ onToast }: { onToast: (message: string) => void }) {
       await appendWithMotion([{ type: 'error', text: error instanceof Error ? error.message : '环境接入失败', time: new Date().toISOString() }])
     } finally {
       setDeploying(false)
+    }
+  }
+
+  const autoStartEnvironment = async () => {
+    try {
+      const data = await responseJson<{ lines: TerminalLine[]; status: EnvironmentStatus }>(await fetch('/api/environment/auto-start', { method: 'POST' }))
+      await appendWithMotion(data.lines)
+      setStatus(data.status)
+    } catch (error) {
+      await appendWithMotion([{ type: 'warning', text: error instanceof Error ? error.message : 'ComfyUI 自动启动失败', time: new Date().toISOString() }])
     }
   }
 

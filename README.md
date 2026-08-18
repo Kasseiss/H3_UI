@@ -17,6 +17,7 @@ MiniMax H3 单机一体化创作界面。管理页面、任务服务、ComfyUI �
 - systemd 常驻与异常自动重启配置
 - 可视化一站式环境接入与大屏实例终端
 - 受控的 ComfyUI 启动、重启、停止和日志命令
+- H3 服务启动及“环境部署”页面打开时自动拉起 ComfyUI
 
 ## 本地运行
 
@@ -108,3 +109,4 @@ journalctl -u h3-studio -f
 | `COMFYUI_SERVICE_SCOPE` | `system` | `system` 或 `user` 服务 |
 | `H3_ALLOW_SERVICE_CONTROL` | 未启用 | 设为 `1` 后显示真实服务控制能力 |
 | `H3_SERVICE_CONTROL_USE_SUDO` | 未启用 | 设为 `1` 后使用受限 sudoers 控制系统服务 |
+| `H3_AUTO_START_COMFYUI` | `1` | H3 启动及环境页打开时自动启动 ComfyUI |
