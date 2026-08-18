@@ -3,6 +3,7 @@ import {
   Archive,
   ArrowUp,
   Bell,
+  Bot,
   Check,
   ChevronDown,
   ChevronRight,
@@ -36,6 +37,7 @@ import {
   Search,
   Server,
   Settings,
+  ShieldCheck,
   SlidersHorizontal,
   Sparkles,
   Square,
@@ -142,6 +144,19 @@ type TerminalLine = {
   type: 'command' | 'success' | 'warning' | 'error' | 'info'
   text: string
   time: string
+}
+
+type HarnessConfig = {
+  configured: boolean
+  model: string | null
+  hasApiKey: boolean
+  tools: { name: string; mutating: boolean }[]
+}
+
+type HarnessMessage = {
+  role: 'user' | 'assistant'
+  content: string
+  tools?: string[]
 }
 
 const initialThreads: Thread[] = [
@@ -1414,6 +1429,12 @@ function EnvironmentView({ onToast }: { onToast: (message: string) => void }) {
   const [serviceAction, setServiceAction] = useState<'restart' | 'stop' | null>(null)
   const [command, setCommand] = useState('')
   const [terminalBusy, setTerminalBusy] = useState(false)
+  const [harnessConfig, setHarnessConfig] = useState<HarnessConfig | null>(null)
+  const [harnessToken, setHarnessToken] = useState(() => window.sessionStorage.getItem('h3-harness-token') || '')
+  const [harnessPrompt, setHarnessPrompt] = useState('')
+  const [harnessBusy, setHarnessBusy] = useState(false)
+  const [harnessMutations, setHarnessMutations] = useState(false)
+  const [harnessMessages, setHarnessMessages] = useState<HarnessMessage[]>([])
   const [lines, setLines] = useState<TerminalLine[]>([
     { type: 'success', text: 'H3 环境终端已连接', time: new Date().toISOString() },
     { type: 'info', text: '输入 help 查看可用命令', time: new Date().toISOString() },
@@ -1443,8 +1464,14 @@ function EnvironmentView({ onToast }: { onToast: (message: string) => void }) {
     }
   }
 
+  const refreshHarnessConfig = async () => {
+    try { setHarnessConfig(await responseJson<HarnessConfig>(await fetch('/api/harness/config'))) }
+    catch { setHarnessConfig(null) }
+  }
+
   useEffect(() => {
     void refreshStatus()
+    void refreshHarnessConfig()
     if (!terminalBootedRef.current) {
       terminalBootedRef.current = true
       window.setTimeout(() => void runTerminalCommand('status'), 120)
@@ -1540,6 +1567,29 @@ function EnvironmentView({ onToast }: { onToast: (message: string) => void }) {
     }
   }
 
+  const sendHarnessMessage = async (requested = harnessPrompt) => {
+    const value = requested.trim()
+    if (!value || harnessBusy) return
+    if (!harnessToken.trim()) { onToast('请输入服务器助手访问令牌'); return }
+    const allowMutations = harnessMutations
+    setHarnessMutations(false)
+    setHarnessPrompt('')
+    const history = harnessMessages.slice(-10).map(({ role, content }) => ({ role, content }))
+    setHarnessMessages((current) => [...current, { role: 'user', content: value }])
+    setHarnessBusy(true)
+    try {
+      const data = await responseJson<{ reply: string; toolResults: { name: string; ok: boolean; summary: string }[] }>(await fetch('/api/harness/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${harnessToken.trim()}` },
+        body: JSON.stringify({ message: value, history, allowMutations }),
+      }))
+      setHarnessMessages((current) => [...current, { role: 'assistant' as const, content: data.reply, tools: data.toolResults.map((item) => item.name) }].slice(-30))
+      if (data.toolResults.some((item) => ['comfy_control'].includes(item.name) && item.ok)) void refreshStatus(true)
+    } catch (error) {
+      setHarnessMessages((current) => [...current, { role: 'assistant' as const, content: error instanceof Error ? error.message : '服务器助手请求失败' }].slice(-30))
+    } finally { setHarnessBusy(false) }
+  }
+
   return (
     <div className="environment-view">
       <section className={`environment-hero ${status?.ready ? 'ready' : ''}`}>
@@ -1594,6 +1644,38 @@ function EnvironmentView({ onToast }: { onToast: (message: string) => void }) {
           <input value={command} onChange={(event) => setCommand(event.target.value)} placeholder="输入 help 查看命令" autoComplete="off" spellCheck={false} />
           <button disabled={!command.trim() || terminalBusy} aria-label="执行终端命令"><ArrowUp size={15} /></button>
         </form>
+      </section>
+
+      <section className="server-harness-panel">
+        <header>
+          <div className="harness-title"><span><Bot size={18} /></span><div><strong>服务器助手</strong><small>{harnessConfig?.configured ? `${harnessConfig.model} · 安全工具模式` : '等待接入你的 API'}</small></div></div>
+          <span className={`harness-state ${harnessConfig?.configured ? 'online' : ''}`}><i />{harnessConfig?.configured ? '已配置' : '未配置'}</span>
+        </header>
+        {!harnessConfig?.configured ? (
+          <div className="harness-empty"><ShieldCheck size={21} /><div><strong>先在服务器完成一次安全配置</strong><p>运行 <code>bash deploy/configure-harness.sh</code>，填写 API 地址、模型和密钥。API Key 不会发送到浏览器。</p></div></div>
+        ) : (
+          <>
+            <div className="harness-access-row">
+              <label><span>访问令牌</span><input type="password" value={harnessToken} onChange={(event) => {
+                setHarnessToken(event.target.value)
+                window.sessionStorage.setItem('h3-harness-token', event.target.value)
+              }} placeholder="配置脚本生成的网页令牌" autoComplete="off" /></label>
+              <label className="harness-permission"><input type="checkbox" checked={harnessMutations} onChange={(event) => setHarnessMutations(event.target.checked)} /><span><ShieldCheck size={13} />允许本次执行 ComfyUI 服务操作</span></label>
+            </div>
+            <div className="harness-quick-actions">
+              {['检查服务器整体状态', '为什么当前不能生成视频？', '查看 GPU 和磁盘资源', '分析最近的 H3 日志'].map((item) => <button key={item} disabled={harnessBusy} onClick={() => void sendHarnessMessage(item)}>{item}</button>)}
+            </div>
+            <div className="harness-messages" aria-live="polite">
+              {!harnessMessages.length && <div className="harness-welcome"><Bot size={20} /><p>可以询问服务器状态、磁盘、GPU、进程、端口、日志和 ComfyUI。默认只读。</p></div>}
+              {harnessMessages.map((message, index) => <article className={message.role} key={`${message.role}-${index}`}><strong>{message.role === 'user' ? '你' : '助手'}</strong><p>{message.content}</p>{Boolean(message.tools?.length) && <small>已使用：{message.tools?.join('、')}</small>}</article>)}
+              {harnessBusy && <article className="assistant thinking"><strong>助手</strong><p><i /><i /><i /></p></article>}
+            </div>
+            <form className="harness-input" onSubmit={(event) => { event.preventDefault(); void sendHarnessMessage() }}>
+              <textarea value={harnessPrompt} onChange={(event) => setHarnessPrompt(event.target.value)} placeholder="例如：检查磁盘为什么满了，并告诉我应该怎么处理" rows={2} />
+              <button disabled={!harnessPrompt.trim() || harnessBusy} aria-label="发送给服务器助手"><ArrowUp size={16} /></button>
+            </form>
+          </>
+        )}
       </section>
       <UnifiedModal
         open={Boolean(serviceAction)}

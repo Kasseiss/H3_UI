@@ -140,6 +140,8 @@ cd "$PROJECT_DIR"
 npm install --no-audit --no-fund
 npm run build
 
+HARNESS_SETTINGS=''
+[ -f "$PROJECT_DIR/.h3.env" ] && HARNESS_SETTINGS=$(grep '^H3_HARNESS_' "$PROJECT_DIR/.h3.env" || true)
 quote_env() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 {
   printf 'NODE_ENV=production\n'
@@ -154,9 +156,10 @@ quote_env() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
   printf 'COMFYUI_ROOT="%s"\n' "$(quote_env "$COMFY_ROOT_FOUND")"
   [ -n "$COMFY_PYTHON_FOUND" ] && printf 'COMFYUI_PYTHON="%s"\n' "$(quote_env "$COMFY_PYTHON_FOUND")"
   [ -n "$COMFY_SCRIPT_FOUND" ] && printf 'COMFYUI_START_SCRIPT="%s"\n' "$(quote_env "$COMFY_SCRIPT_FOUND")"
+  [ -n "$HARNESS_SETTINGS" ] && printf '%s\n' "$HARNESS_SETTINGS"
 } >"$PROJECT_DIR/.h3.env"
 chmod 600 "$PROJECT_DIR/.h3.env"
-chmod +x "$SCRIPT_DIR/h3ctl.sh" "$SCRIPT_DIR/h3-supervisor.sh" "$SCRIPT_DIR/install.sh"
+chmod +x "$SCRIPT_DIR/h3ctl.sh" "$SCRIPT_DIR/h3-supervisor.sh" "$SCRIPT_DIR/install.sh" "$SCRIPT_DIR/configure-harness.sh"
 
 if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1 && [ "$(id -u)" -eq 0 ]; then
   NODE_BIN=$(command -v node)

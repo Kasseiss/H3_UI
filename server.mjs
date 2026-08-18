@@ -2,12 +2,13 @@ import { constants as fsConstants, createReadStream, createWriteStream } from 'n
 import { access, appendFile, mkdir, open, readFile, readdir, readlink, rename, stat, statfs, unlink, writeFile } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
-import { homedir } from 'node:os'
+import { cpus, freemem, homedir, loadavg, totalmem, uptime as systemUptime } from 'node:os'
 import path from 'node:path'
 import { Readable, Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { fileURLToPath } from 'node:url'
-import { randomUUID } from 'node:crypto'
+import { randomUUID, timingSafeEqual } from 'node:crypto'
+import { createServerHarness } from './lib/server-harness.mjs'
 
 const projectRoot = path.dirname(fileURLToPath(import.meta.url))
 const distRoot = path.join(projectRoot, 'dist')
@@ -44,6 +45,13 @@ const autoStartComfy = process.env.H3_AUTO_START_COMFYUI !== '0'
 const maxUploadBytes = Number(process.env.H3_MAX_UPLOAD_BYTES || 4 * 1024 * 1024 * 1024)
 const minimumFreeBytes = Number(process.env.H3_MIN_FREE_BYTES || 2 * 1024 * 1024 * 1024)
 const comfyManagerLogPath = path.join(logRoot, 'comfy-manager.log')
+const harnessConfig = {
+  apiBase: String(process.env.H3_HARNESS_API_BASE || '').trim(),
+  apiKey: String(process.env.H3_HARNESS_API_KEY || '').trim(),
+  model: String(process.env.H3_HARNESS_MODEL || '').trim(),
+  accessToken: String(process.env.H3_HARNESS_ACCESS_TOKEN || '').trim(),
+  timeoutMs: Number(process.env.H3_HARNESS_TIMEOUT_MS || 45000),
+}
 const startedAt = new Date().toISOString()
 
 await Promise.all([storageRoot, dataRoot, logRoot].map((directory) => mkdir(directory, { recursive: true })))
@@ -811,6 +819,124 @@ async function refreshJob(job) {
   return job
 }
 
+function bytesSummary(value) {
+  return `${Math.round(Number(value || 0) / 1024 / 1024 / 1024 * 10) / 10} GB`
+}
+
+async function diskSummary(target) {
+  const disk = await statfs(target)
+  const total = Number(disk.blocks * disk.bsize)
+  const free = Number(disk.bavail * disk.bsize)
+  return { path: target, total: bytesSummary(total), used: bytesSummary(total - free), free: bytesSummary(free), freeBytes: free }
+}
+
+async function readRecentHarnessLogs(source, requestedLines) {
+  const count = Math.min(120, Math.max(10, Number.parseInt(requestedLines, 10) || 50))
+  const target = source === 'comfy' ? comfyManagerLogPath : path.join(logRoot, `h3-${new Date().toISOString().slice(0, 10)}.log`)
+  try { return (await readFile(target, 'utf8')).trim().split('\n').slice(-count) }
+  catch { return [] }
+}
+
+const harnessTools = [
+  {
+    name: 'environment_status',
+    description: '读取 H3、ComfyUI、工作流、模型、存储和守护方式的实时状态。',
+    parameters: { type: 'object', properties: {}, additionalProperties: false },
+    mutating: false,
+    execute: async () => environmentStatus(),
+  },
+  {
+    name: 'server_resources',
+    description: '读取服务器 CPU、内存、负载、磁盘和 NVIDIA GPU 状态。',
+    parameters: { type: 'object', properties: {}, additionalProperties: false },
+    mutating: false,
+    execute: async () => {
+      const gpu = await runProcess('nvidia-smi', ['--query-gpu=name,utilization.gpu,memory.total,memory.used,temperature.gpu', '--format=csv,noheader,nounits'], 6000)
+      return {
+        platform: `${process.platform} ${process.arch}`,
+        cpu: { logicalCores: cpus().length, loadAverage: loadavg() },
+        memory: { total: bytesSummary(totalmem()), free: bytesSummary(freemem()) },
+        uptimeSeconds: Math.floor(systemUptime()),
+        disks: await Promise.all([...new Set([projectRoot, storageRoot])].map(diskSummary)),
+        gpu: gpu.ok ? gpu.output.split('\n').map((line) => line.trim()).filter(Boolean) : { available: false, reason: gpu.error || gpu.output || 'nvidia-smi 不可用' },
+      }
+    },
+  },
+  {
+    name: 'process_list',
+    description: '读取当前 CPU 占用较高的进程，最多返回 40 行。',
+    parameters: { type: 'object', properties: {}, additionalProperties: false },
+    mutating: false,
+    execute: async () => {
+      const result = process.platform === 'win32'
+        ? await runProcess('tasklist', ['/FO', 'CSV'], 6000)
+        : await runProcess('ps', ['-eo', 'pid,ppid,%cpu,%mem,etime,comm', '--sort=-%cpu'], 6000)
+      if (!result.ok) throw new Error(result.error || '无法读取进程列表')
+      return { lines: result.output.split('\n').slice(0, 41) }
+    },
+  },
+  {
+    name: 'network_listeners',
+    description: '读取服务器当前 TCP 监听端口。',
+    parameters: { type: 'object', properties: {}, additionalProperties: false },
+    mutating: false,
+    execute: async () => {
+      if (process.platform === 'win32') {
+        const result = await runProcess('netstat', ['-ano', '-p', 'tcp'], 6000)
+        if (!result.ok) throw new Error(result.error || '无法读取监听端口')
+        return { lines: result.output.split('\n').filter((line) => /LISTENING/i.test(line)).slice(0, 80) }
+      }
+      let result = await runProcess('ss', ['-ltnp'], 6000)
+      if (!result.ok) result = await runProcess('netstat', ['-ltnp'], 6000)
+      if (!result.ok) throw new Error('服务器没有安装 ss 或 netstat，无法读取监听端口')
+      return { lines: result.output.split('\n').slice(0, 80) }
+    },
+  },
+  {
+    name: 'recent_logs',
+    description: '读取 H3 或 ComfyUI 的最近日志。',
+    parameters: {
+      type: 'object',
+      properties: { source: { type: 'string', enum: ['h3', 'comfy'] }, lines: { type: 'integer', minimum: 10, maximum: 120 } },
+      required: ['source'], additionalProperties: false,
+    },
+    mutating: false,
+    execute: async ({ source, lines }) => ({ source, lines: await readRecentHarnessLogs(source, lines) }),
+  },
+  {
+    name: 'storage_list',
+    description: '列出 H3 服务器云盘中的文件和文件夹，不读取文件内容。',
+    parameters: {
+      type: 'object', properties: { path: { type: 'string', description: '相对于 H3 云盘根目录的路径，根目录使用空字符串。' } },
+      required: ['path'], additionalProperties: false,
+    },
+    mutating: false,
+    execute: async ({ path: relativePath }) => listStorage(String(relativePath || '').slice(0, 500)),
+  },
+  {
+    name: 'comfy_control',
+    description: '启动、停止或重启本机 ComfyUI。只有用户明确允许本次执行服务操作时才可用。',
+    parameters: {
+      type: 'object', properties: { action: { type: 'string', enum: ['start', 'restart', 'stop'] } },
+      required: ['action'], additionalProperties: false,
+    },
+    mutating: true,
+    execute: async ({ action }) => controlComfyService(String(action || '')),
+  },
+]
+
+const serverHarness = createServerHarness({ config: harnessConfig, tools: harnessTools })
+let activeHarnessRequests = 0
+
+function harnessAuthorized(req) {
+  if (!harnessConfig.accessToken) return false
+  const header = String(req.headers.authorization || '')
+  const provided = header.startsWith('Bearer ') ? header.slice(7).trim() : String(req.headers['x-h3-harness-token'] || '').trim()
+  const expectedBuffer = Buffer.from(harnessConfig.accessToken)
+  const providedBuffer = Buffer.from(provided)
+  return expectedBuffer.length === providedBuffer.length && expectedBuffer.length > 0 && timingSafeEqual(expectedBuffer, providedBuffer)
+}
+
 async function handleApi(req, res, url) {
   if (req.method === 'GET' && url.pathname === '/api/health') {
     let comfy = { connected: false }
@@ -823,6 +949,28 @@ async function handleApi(req, res, url) {
 
   if (req.method === 'GET' && url.pathname === '/api/environment/status') {
     return json(res, 200, await environmentStatus())
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/harness/config') {
+    return json(res, 200, {
+      configured: Boolean(harnessConfig.apiBase && harnessConfig.model && harnessConfig.accessToken),
+      model: harnessConfig.model || null,
+      hasApiKey: Boolean(harnessConfig.apiKey),
+      tools: harnessTools.map((tool) => ({ name: tool.name, mutating: Boolean(tool.mutating) })),
+    })
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/harness/chat') {
+    if (!harnessConfig.apiBase || !harnessConfig.model || !harnessConfig.accessToken) return json(res, 503, { error: '服务器助手尚未配置，请先运行 deploy/configure-harness.sh' })
+    if (!harnessAuthorized(req)) return json(res, 401, { error: '服务器助手访问令牌不正确' })
+    if (activeHarnessRequests >= 2) return json(res, 429, { error: '服务器助手正忙，请稍后再试' })
+    const body = await readJson(req)
+    activeHarnessRequests += 1
+    try {
+      const result = await serverHarness.chat({ message: body.message, history: body.history, allowMutations: body.allowMutations === true })
+      await log('info', 'harness_chat_completed', { tools: result.toolResults.map((item) => item.name), mutationsAllowed: body.allowMutations === true })
+      return json(res, 200, result)
+    } finally { activeHarnessRequests -= 1 }
   }
 
   if (req.method === 'GET' && url.pathname === '/api/environment/config') {

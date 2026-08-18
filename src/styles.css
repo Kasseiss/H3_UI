@@ -1640,6 +1640,53 @@ select:focus-visible {
 .service-confirm-copy strong { font-size: 10px; }
 .service-confirm-copy small { margin-top: 3px; color: #9999a0; font-size: 8px; }
 
+.server-harness-panel { order: 4; overflow: hidden; border: 1px solid #e3e3e0; border-radius: 15px; background: #fff; box-shadow: 0 9px 30px rgba(28,28,36,.05); animation: content-rise 360ms 120ms ease both; }
+.server-harness-panel > header { display: flex; min-height: 58px; align-items: center; justify-content: space-between; padding: 10px 15px; border-bottom: 1px solid #ecece9; }
+.harness-title { display: flex; align-items: center; gap: 9px; }
+.harness-title > span { display: grid; width: 34px; height: 34px; color: #fff; border-radius: 10px; background: linear-gradient(145deg, #6e6fe2, #4d4ebc); box-shadow: 0 6px 16px rgba(82,83,196,.22); place-items: center; }
+.harness-title strong, .harness-title small { display: block; }
+.harness-title strong { color: #3b3b42; font-size: 11px; }
+.harness-title small { margin-top: 3px; color: #9999a0; font-size: 8px; }
+.harness-state { display: inline-flex; align-items: center; padding: 5px 8px; color: #8a6a35; font-size: 8px; font-weight: 700; border-radius: 7px; background: #fff1d8; gap: 5px; }
+.harness-state i { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.harness-state.online { color: #267b52; background: #e6f6ed; }
+.harness-empty { display: flex; align-items: center; margin: 14px; padding: 15px; color: #6a6bd2; border: 1px dashed #d8d8e8; border-radius: 11px; background: #fafaff; gap: 11px; }
+.harness-empty strong { display: block; color: #44444c; font-size: 10px; }
+.harness-empty p { margin: 4px 0 0; color: #8c8c94; font-size: 8px; }
+.harness-empty code { color: #595ac9; font: 8px 'SFMono-Regular', Consolas, monospace; }
+.harness-access-row { display: flex; align-items: flex-end; padding: 12px 14px 9px; gap: 12px; }
+.harness-access-row > label:first-child { min-width: 220px; flex: 1; }
+.harness-access-row label > span:first-child { display: block; margin-bottom: 5px; color: #7e7e86; font-size: 8px; font-weight: 650; }
+.harness-access-row input[type='password'] { width: 100%; height: 34px; padding: 0 10px; color: #45454c; font-size: 9px; border: 1px solid #dededb; border-radius: 8px; outline: 0; background: #fbfbfa; transition: 150ms ease; }
+.harness-access-row input[type='password']:focus { border-color: #a7a8e7; box-shadow: 0 0 0 3px rgba(100,101,208,.08); }
+.harness-permission { display: flex; min-height: 34px; align-items: center; cursor: pointer; }
+.harness-permission input { width: 14px; height: 14px; accent-color: #6263d5; }
+.harness-permission > span:last-child { display: inline-flex; align-items: center; margin: 0 0 0 6px; color: #77777f; font-size: 8px; gap: 4px; }
+.harness-quick-actions { display: flex; padding: 0 14px 10px; overflow-x: auto; gap: 6px; }
+.harness-quick-actions button { min-height: 27px; padding: 0 9px; cursor: pointer; color: #62636e; font-size: 8px; white-space: nowrap; border: 1px solid #e1e1de; border-radius: 7px; background: #fafaf9; transition: 140ms ease; }
+.harness-quick-actions button:hover { color: #5556c4; border-color: #cecee9; background: #f8f8ff; transform: translateY(-1px); }
+.harness-quick-actions button:disabled { cursor: wait; opacity: .45; transform: none; }
+.harness-messages { min-height: 220px; max-height: 420px; padding: 15px; overflow: auto; border-block: 1px solid #ecece9; background: #f8f8f6; }
+.harness-welcome { display: grid; min-height: 190px; color: #7879d8; text-align: center; place-content: center; justify-items: center; }
+.harness-welcome p { max-width: 330px; margin: 8px 0 0; color: #929299; font-size: 9px; line-height: 1.6; }
+.harness-messages article { width: min(82%, 680px); margin-bottom: 10px; padding: 10px 11px; border: 1px solid #e2e2df; border-radius: 11px; background: #fff; box-shadow: 0 3px 11px rgba(25,25,32,.035); animation: harness-message-in 180ms ease both; }
+@keyframes harness-message-in { from { opacity: 0; transform: translateY(4px) scale(.99); } }
+.harness-messages article.user { margin-left: auto; color: #fff; border-color: #6263d5; background: linear-gradient(145deg, #7071df, #5657c6); }
+.harness-messages article strong { display: block; margin-bottom: 5px; color: #75757d; font-size: 8px; }
+.harness-messages article.user strong { color: rgba(255,255,255,.68); }
+.harness-messages article p { margin: 0; font-size: 9px; line-height: 1.65; white-space: pre-wrap; word-break: break-word; }
+.harness-messages article small { display: block; margin-top: 7px; color: #94949d; font-size: 7px; }
+.harness-messages article.thinking p { display: flex; min-height: 16px; align-items: center; gap: 4px; }
+.harness-messages article.thinking i { width: 5px; height: 5px; border-radius: 50%; background: #7778d8; animation: terminal-dot 700ms infinite alternate; }
+.harness-messages article.thinking i:nth-child(2) { animation-delay: 120ms; }
+.harness-messages article.thinking i:nth-child(3) { animation-delay: 240ms; }
+.harness-input { display: flex; align-items: flex-end; padding: 10px 12px; gap: 8px; }
+.harness-input textarea { min-height: 42px; max-height: 110px; flex: 1; padding: 9px 10px; resize: vertical; color: #44444b; font: 9px/1.5 inherit; border: 1px solid #dededb; border-radius: 9px; outline: 0; background: #fbfbfa; transition: 150ms ease; }
+.harness-input textarea:focus { border-color: #a7a8e7; box-shadow: 0 0 0 3px rgba(100,101,208,.08); }
+.harness-input button { display: grid; width: 36px; height: 36px; flex: 0 0 auto; cursor: pointer; color: #fff; border: 0; border-radius: 10px; background: #5d5ed2; box-shadow: 0 5px 13px rgba(80,81,190,.2); place-items: center; transition: 150ms ease; }
+.harness-input button:hover { transform: translateY(-1px); }
+.harness-input button:disabled { cursor: default; opacity: .35; box-shadow: none; transform: none; }
+
 .toast {
   position: fixed;
   z-index: 100;
@@ -2047,6 +2094,11 @@ select:focus-visible {
   .terminal-runtime { display: none; }
   .terminal-shortcuts { overflow-x: auto; }
   .terminal-output { height: 360px; font-size: 9px; }
+  .harness-access-row { align-items: stretch; flex-direction: column; }
+  .harness-access-row > label:first-child { min-width: 0; }
+  .harness-permission { min-height: 25px; }
+  .harness-messages { min-height: 260px; padding: 10px; }
+  .harness-messages article { width: 92%; }
   .storage-overview { padding: 18px; }
   .storage-summary { min-width: calc(100% - 74px); }
   .storage-summary p { font-size: 9px; }

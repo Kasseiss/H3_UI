@@ -47,6 +47,23 @@ bash deploy/h3ctl.sh restart
 bash deploy/h3ctl.sh logs
 ```
 
+## 服务器助手 Harness
+
+H3 内置一个轻量服务器管理 harness，可接入支持 OpenAI Chat Completions 工具调用格式的自有 API。API Key 只保存在服务器的 `.h3.env`，不会下发到网页或写入日志。
+
+首次配置：
+
+```bash
+cd H3_UI
+bash deploy/configure-harness.sh
+```
+
+按提示填写 API 基础地址（通常以 `/v1` 结尾）、模型名称和 API Key。脚本会生成一枚独立的网页访问令牌并自动重启 H3；在“环境部署”页面的服务器助手中输入该令牌即可使用。
+
+Harness 默认只开放状态、CPU/内存/GPU、磁盘、进程、监听端口、日志和云盘列表等只读工具。ComfyUI 启停工具只有在网页中勾选“允许本次执行服务操作”后才会提供给模型；不提供任意 Shell、删除文件、关机或重启服务器能力。
+
+若网页需要从公网访问，请使用 HTTPS 反向代理并限制来源 IP；不要直接通过公网明文 HTTP 传输服务器助手访问令牌。
+
 ## 本地运行
 
 ```bash
