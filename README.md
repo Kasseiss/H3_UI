@@ -96,7 +96,7 @@ journalctl -u h3-studio -f
 
 | 变量 | 默认值 | 用途 |
 | --- | --- | --- |
-| `H3_HOST` | `127.0.0.1` | 监听地址 |
+| `H3_HOST` | `0.0.0.0` | 监听地址 |
 | `H3_PORT` | `12233` | 页面与接口端口 |
 | `COMFYUI_URL` | `http://127.0.0.1:12234` | 本机 ComfyUI 地址 |
 | `H3_WORKFLOW_PATH` | `workflows/h3-api.json` | H3 API 工作流 |

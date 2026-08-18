@@ -16,7 +16,7 @@ const logRoot = path.resolve(process.env.H3_LOG_ROOT || path.join(projectRoot, '
 const jobStorePath = path.join(dataRoot, 'generations.json')
 const workflowPath = path.resolve(process.env.H3_WORKFLOW_PATH || path.join(projectRoot, 'workflows', 'h3-api.json'))
 const port = Number(process.env.H3_PORT || 12233)
-const host = process.env.H3_HOST || '127.0.0.1'
+const host = process.env.H3_HOST || '0.0.0.0'
 const comfyUrl = (process.env.COMFYUI_URL || 'http://127.0.0.1:12234').replace(/\/+$/, '')
 const comfyServiceName = /^[a-zA-Z0-9_.@-]+$/.test(process.env.COMFYUI_SERVICE_NAME || '') ? process.env.COMFYUI_SERVICE_NAME : 'comfyui.service'
 const comfyServiceScope = process.env.COMFYUI_SERVICE_SCOPE === 'user' ? 'user' : 'system'
