@@ -25,17 +25,17 @@ npm install
 npm run start
 ```
 
-正式部署服务监听：`0.0.0.0:51249`，访问地址使用服务器 IP 或域名，例如 `http://服务器IP:51249`。
+正式部署服务监听：`0.0.0.0:12233`，访问地址使用服务器 IP 或域名，例如 `http://服务器IP:12233`。
 
-ComfyUI 只在服务器内部监听 `127.0.0.1:51250`，由 H3 Studio 转发调用，不建议直接开放到公网。
+ComfyUI 只在服务器内部监听 `127.0.0.1:12234`，由 H3 Studio 转发调用，不建议直接开放到公网。
 
 如果服务器启用了 UFW，需要放行 H3 端口：
 
 ```bash
-sudo ufw allow 51249/tcp
+sudo ufw allow 12233/tcp
 ```
 
-更安全的生产方式是让 Nginx/Caddy 代理到 `127.0.0.1:51249`，公网只开放 80/443。
+更安全的生产方式是让 Nginx/Caddy 代理到 `127.0.0.1:12233`，公网只开放 80/443。
 
 开发时分别运行：
 
@@ -53,12 +53,12 @@ npm run dev
 3. 按 [workflows/README.md](workflows/README.md) 替换需要动态控制的值。
 4. 保存为 `workflows/h3-api.json`，或设置 `H3_WORKFLOW_PATH`。
 
-默认连接 `http://127.0.0.1:51250`。可用环境变量覆盖：
+默认连接 `http://127.0.0.1:12234`。可用环境变量覆盖：
 
-你的 ComfyUI 启动服务也需要监听 `51250`，例如启动参数使用 `--port 51250`；否则 H3 页面会显示 ComfyUI 未连接。
+你的 ComfyUI 启动服务也需要监听 `12234`，例如启动参数使用 `--port 12234`；否则 H3 页面会显示 ComfyUI 未连接。
 
 ```bash
-COMFYUI_URL=http://127.0.0.1:51250 \
+COMFYUI_URL=http://127.0.0.1:12234 \
 H3_WORKFLOW_PATH=/opt/h3-studio/workflows/h3-api.json \
 npm run start
 ```
@@ -97,8 +97,8 @@ journalctl -u h3-studio -f
 | 变量 | 默认值 | 用途 |
 | --- | --- | --- |
 | `H3_HOST` | `127.0.0.1` | 监听地址 |
-| `H3_PORT` | `51249` | 页面与接口端口 |
-| `COMFYUI_URL` | `http://127.0.0.1:51250` | 本机 ComfyUI 地址 |
+| `H3_PORT` | `12233` | 页面与接口端口 |
+| `COMFYUI_URL` | `http://127.0.0.1:12234` | 本机 ComfyUI 地址 |
 | `H3_WORKFLOW_PATH` | `workflows/h3-api.json` | H3 API 工作流 |
 | `H3_STORAGE_ROOT` | `server-storage` | 服务器云盘目录 |
 | `H3_DATA_ROOT` | `data` | 任务状态目录 |

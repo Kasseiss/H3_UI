@@ -11,8 +11,8 @@ Group=h3studio
 WorkingDirectory=/opt/h3-studio
 Environment=NODE_ENV=production
 Environment=H3_HOST=0.0.0.0
-Environment=H3_PORT=51249
-Environment=COMFYUI_URL=http://127.0.0.1:51250
+Environment=H3_PORT=12233
+Environment=COMFYUI_URL=http://127.0.0.1:12234
 Environment=COMFYUI_SERVICE_NAME=comfyui.service
 Environment=COMFYUI_SERVICE_SCOPE=system
 Environment=H3_ALLOW_SERVICE_CONTROL=1
