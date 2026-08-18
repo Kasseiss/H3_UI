@@ -16,7 +16,6 @@ install_packages() {
   missing=''
   command -v git >/dev/null 2>&1 || missing="$missing git"
   command -v curl >/dev/null 2>&1 || missing="$missing curl"
-  command -v ffmpeg >/dev/null 2>&1 || missing="$missing ffmpeg"
   command -v python3 >/dev/null 2>&1 || missing="$missing python3 python3-venv"
   [ -z "$missing" ] && return
   if [ "$(id -u)" -ne 0 ]; then fail "缺少依赖:$missing；请用 root 运行，或先安装这些软件"; fi
@@ -26,6 +25,22 @@ install_packages() {
   elif command -v dnf >/dev/null 2>&1; then dnf install -y $missing
   elif command -v yum >/dev/null 2>&1; then yum install -y $missing
   else fail "无法识别系统包管理器，请先安装:$missing"; fi
+}
+
+install_optional_ffmpeg() {
+  command -v ffmpeg >/dev/null 2>&1 && return
+  available_kb=$(df -Pk /var/cache/apt 2>/dev/null | awk 'NR==2 {print $4}' || true)
+  if [ -n "$available_kb" ] && [ "$available_kb" -lt 614400 ]; then
+    say '系统盘可用空间不足 600 MB，暂不安装可选的 FFmpeg；网页和 ComfyUI 可继续运行'
+    return
+  fi
+  if [ "$(id -u)" -ne 0 ]; then say '未安装可选的 FFmpeg；稍后可由管理员补装'; return; fi
+  say '尝试安装可选的 FFmpeg'
+  if command -v apt-get >/dev/null 2>&1; then
+    (apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y ffmpeg) || say 'FFmpeg 安装失败，继续部署核心服务'
+  elif command -v dnf >/dev/null 2>&1; then dnf install -y ffmpeg || say 'FFmpeg 安装失败，继续部署核心服务'
+  elif command -v yum >/dev/null 2>&1; then yum install -y ffmpeg || say 'FFmpeg 安装失败，继续部署核心服务'
+  else say '无法自动安装 FFmpeg，继续部署核心服务'; fi
 }
 
 install_node() {
@@ -62,7 +77,11 @@ find_comfy_script() {
 
 install_packages
 install_node
+install_optional_ffmpeg
 mkdir -p "$RUNTIME_ROOT" "$RUNTIME_ROOT/data" "$RUNTIME_ROOT/logs" "$RUNTIME_ROOT/storage"
+
+runtime_free_kb=$(df -Pk "$RUNTIME_ROOT" | awk 'NR==2 {print $4}')
+[ "$runtime_free_kb" -ge 1048576 ] || say "警告：运行数据盘剩余不足 1 GB，生成视频前请扩容或通过 H3_RUNTIME_ROOT 指向可写数据盘"
 
 COMFY_ROOT_FOUND=$(find_comfy_root || true)
 COMFY_SCRIPT_FOUND=$(find_comfy_script || true)
