@@ -35,8 +35,9 @@ sudo bash deploy/install.sh
 - 无 systemd 的容器：自动启用项目自带的守护进程
 - 已有 ComfyUI：记录真实目录、Python、启动脚本和端口
 - 完全空的服务器：默认安装基础 ComfyUI 到可配置的数据目录
+- 缺少 H3 本地模型：按 ComfyUI 官方模板下载 768P 主模型、文本编码器和两个 VAE（约 55 GB）
 
-默认数据目录遵循 `$XDG_DATA_HOME`，可在安装前通过 `H3_RUNTIME_ROOT` 修改。若不希望自动安装基础 ComfyUI，可设置 `H3_INSTALL_COMFYUI=0`。
+默认数据目录遵循 `$XDG_DATA_HOME`，可在安装前通过 `H3_RUNTIME_ROOT` 修改。若不希望自动安装基础 ComfyUI，可设置 `H3_INSTALL_COMFYUI=0`；若模型由服务器镜像预装或挂载，可设置 `H3_INSTALL_H3_MODELS=0` 跳过下载。全新安装建议至少准备 64 GB 可写模型空间。
 
 部署完成后打开 `http://服务器IP:12233`。服务控制命令：
 

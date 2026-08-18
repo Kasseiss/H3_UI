@@ -8,6 +8,7 @@ RUNTIME_ROOT=${H3_RUNTIME_ROOT:-"${XDG_DATA_HOME:-$HOME/.local/share}/h3-studio"
 H3_PORT_VALUE=${H3_PORT:-12233}
 COMFY_PORT_VALUE=${COMFYUI_PORT:-12234}
 INSTALL_COMFY=${H3_INSTALL_COMFYUI:-1}
+INSTALL_H3_MODELS=${H3_INSTALL_H3_MODELS:-auto}
 
 say() { printf '[H3] %s\n' "$*"; }
 fail() { printf '[H3] %s\n' "$*" >&2; exit 1; }
@@ -85,6 +86,7 @@ runtime_free_kb=$(df -Pk "$RUNTIME_ROOT" | awk 'NR==2 {print $4}')
 
 COMFY_ROOT_FOUND=$(find_comfy_root || true)
 COMFY_SCRIPT_FOUND=$(find_comfy_script || true)
+COMFY_NEW=0
 
 if [ -z "$COMFY_ROOT_FOUND" ] && [ "$INSTALL_COMFY" = 1 ]; then
   COMFY_ROOT_FOUND="$RUNTIME_ROOT/ComfyUI"
@@ -93,9 +95,35 @@ if [ -z "$COMFY_ROOT_FOUND" ] && [ "$INSTALL_COMFY" = 1 ]; then
   python3 -m venv "$COMFY_ROOT_FOUND/.venv"
   "$COMFY_ROOT_FOUND/.venv/bin/python" -m pip install --upgrade pip
   "$COMFY_ROOT_FOUND/.venv/bin/python" -m pip install -r "$COMFY_ROOT_FOUND/requirements.txt"
+  COMFY_NEW=1
 fi
 
 [ -n "$COMFY_ROOT_FOUND" ] || fail '没有发现 ComfyUI；请设置 COMFYUI_ROOT，或使用 H3_INSTALL_COMFYUI=1'
+
+if [ "$INSTALL_H3_MODELS" = auto ]; then
+  if [ "$COMFY_NEW" = 1 ] || ! find "$COMFY_ROOT_FOUND/models" -type f -iname '*minimax*h3*' -print -quit 2>/dev/null | grep -q .; then INSTALL_H3_MODELS=1
+  else INSTALL_H3_MODELS=0; fi
+fi
+
+download_model() {
+  relative_path=$1
+  source_url=$2
+  target="$COMFY_ROOT_FOUND/models/$relative_path"
+  [ -s "$target" ] && { say "模型已存在：$(basename "$target")"; return; }
+  mkdir -p "$(dirname "$target")"
+  say "下载 H3 模型：$(basename "$target")"
+  curl -fL --retry 3 --retry-delay 3 -C - -o "$target.part" "$source_url"
+  mv "$target.part" "$target"
+}
+
+if [ "$INSTALL_H3_MODELS" = 1 ]; then
+  model_free_kb=$(df -Pk "$COMFY_ROOT_FOUND" | awk 'NR==2 {print $4}')
+  [ "$model_free_kb" -ge 67108864 ] || fail 'H3 本地模型需要约 55 GB；请确保模型盘至少有 64 GB 可用空间，或用 COMFYUI_ROOT 指向大容量可写盘'
+  download_model 'vae/minimax_h3_video_vae_fp16.safetensors' 'https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_video_vae_fp16.safetensors'
+  download_model 'vae/minimax_h3_audio_vae_fp32.safetensors' 'https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_audio_vae_fp32.safetensors'
+  download_model 'diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors' 'https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors'
+  download_model 'text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors' 'https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors'
+fi
 
 COMFY_PYTHON_FOUND=''
 for candidate in "${COMFYUI_PYTHON:-}" "$COMFY_ROOT_FOUND/.venv/bin/python" "$COMFY_ROOT_FOUND/venv/bin/python"; do

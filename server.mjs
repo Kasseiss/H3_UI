@@ -532,6 +532,10 @@ async function environmentStatus() {
   ])
   let comfy = { connected: false }
   try { comfy = await comfyStatus(3000) } catch { /* reported as disconnected */ }
+  let h3Models = null
+  if (workflow && comfy.connected) {
+    try { h3Models = await resolveH3Models() } catch { /* reported in workflow component */ }
+  }
   let storageWritable = true
   try { await access(storageRoot, fsConstants.R_OK | fsConstants.W_OK) } catch { storageWritable = false }
   const disk = await statfs(storageRoot)
@@ -540,13 +544,13 @@ async function environmentStatus() {
   const components = [
     { id: 'web', name: 'H3 网页服务', status: 'ready', detail: `Node ${process.version} · ${host}:${port}` },
     { id: 'comfy', name: '本机 ComfyUI', status: comfy.connected ? 'ready' : 'missing', detail: comfy.connected ? `${comfy.device || '运行中'} · ${comfyUrl}` : comfyRoot || comfyStartScript ? `已发现，等待启动 · ${comfyUrl}` : `未发现 · 已检查 ${comfyUrl}` },
-    { id: 'workflow', name: 'H3 API 工作流', status: workflow ? 'ready' : 'missing', detail: workflow ? '已载入 768P 工作流' : '等待 h3-api.json' },
+    { id: 'workflow', name: 'H3 768P 工作流与模型', status: workflow && h3Models ? 'ready' : 'missing', detail: !workflow ? '未找到工作流模板' : h3Models ? `已匹配本地模型 · ${h3Models.unet}` : comfy.connected ? '工作流已载入，但未找到完整的 H3 本地模型' : '工作流已载入，连接 ComfyUI 后检查模型' },
     { id: 'ffmpeg', name: 'FFmpeg 视频工具', status: ffmpeg.ok ? 'ready' : 'attention', detail: ffmpeg.ok ? (ffmpeg.output.split('\n')[0] || '可用') : '可选组件未安装，不影响 ComfyUI 直接输出' },
     { id: 'storage', name: '服务器文件空间', status: storageReady ? 'ready' : 'attention', detail: !storageWritable ? '目录不可写' : storageReady ? `可读写 · 剩余 ${Math.round(freeBytes / 1024 / 1024 / 1024)} GB` : `空间不足 · 仅剩 ${Math.round(freeBytes / 1024 / 1024)} MB，生成前请扩容或更换目录` },
     { id: 'service', name: '运行方式', status: process.platform !== 'linux' ? 'development' : service.ok ? 'ready' : 'attention', detail: process.platform !== 'linux' ? '当前为开发模式' : hasSystemd ? (service.ok ? 'systemd 正在守护' : '等待启用 h3-studio.service') : '已适配无 systemd 的容器环境' },
   ]
   return {
-    ready: comfy.connected && workflow && storageReady,
+    ready: comfy.connected && workflow && Boolean(h3Models) && storageReady,
     platform: `${process.platform} ${process.arch}`,
     comfyUrl,
     uptime: Math.floor(process.uptime()),
@@ -656,9 +660,10 @@ function selectModel(values, includes, label) {
 }
 
 async function resolveH3Models() {
-  const response = await fetch(`${comfyUrl}/object_info`, { signal: AbortSignal.timeout(10000) })
-  if (!response.ok) throw new Error(`无法读取 ComfyUI 模型列表 (${response.status})`)
-  const objectInfo = await response.json()
+  const nodeNames = ['UNETLoader', 'CLIPLoader', 'VAELoader']
+  const responses = await Promise.all(nodeNames.map((nodeName) => fetch(`${comfyUrl}/object_info/${nodeName}`, { signal: AbortSignal.timeout(10000) })))
+  if (responses.some((response) => !response.ok)) throw new Error('无法读取 ComfyUI 模型列表')
+  const objectInfo = Object.assign({}, ...await Promise.all(responses.map((response) => response.json())))
   return {
     unet: selectModel(comboValues(objectInfo, 'UNETLoader', 'unet_name'), ['minimax', 'h3'], 'MiniMax H3 主模型'),
     clip: selectModel(comboValues(objectInfo, 'CLIPLoader', 'clip_name'), ['minimax', 'h3'], 'MiniMax H3 文本编码器'),
