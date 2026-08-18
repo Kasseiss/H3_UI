@@ -1410,6 +1410,43 @@ function AssistantMessage({ message, onOpenPreview, onSave, onCancel, onDownload
   const currentProgress = done ? 100 : Math.min(96, Math.max(8, message.progress ?? 8))
   const stage = done ? 3 : message.status === 'queued' ? 0 : currentProgress < 60 ? 1 : 2
   const progressLabels = ['排队等待资源', '生成关键帧', '合成视频片段', '完成']
+
+  const [elapsed, setElapsed] = useState(0)
+  const startTimeRef = useRef<number>(Date.now())
+  const lastProgressRef = useRef(currentProgress)
+
+  useEffect(() => {
+    if (done || failed) return
+    startTimeRef.current = Date.now()
+    lastProgressRef.current = currentProgress
+    const timer = window.setInterval(() => {
+      setElapsed(Math.floor((Date.now() - startTimeRef.current) / 1000))
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [message.jobId, done, failed])
+
+  useEffect(() => {
+    if (currentProgress > lastProgressRef.current) {
+      lastProgressRef.current = currentProgress
+      startTimeRef.current = Date.now()
+      setElapsed(0)
+    }
+  }, [currentProgress])
+
+  const formatTime = (seconds: number) => {
+    if (seconds < 60) return `${seconds}秒`
+    const mins = Math.floor(seconds / 60)
+    const secs = seconds % 60
+    return `${mins}分${secs}秒`
+  }
+
+  const remainingSteps = message.samplingSteps && message.currentStep
+    ? message.samplingSteps - message.currentStep
+    : null
+
+  const estimatedTime = !done && !failed && currentProgress > 8
+    ? Math.round((elapsed / Math.max(currentProgress - 8, 1)) * (100 - currentProgress))
+    : null
   return (
     <article className="message-row assistant-row">
       <div className="assistant-avatar"><Sparkles size={16} /></div>
@@ -1430,11 +1467,29 @@ function AssistantMessage({ message, onOpenPreview, onSave, onCancel, onDownload
             <div className="progress-info">
               <div className="progress-head"><strong>{progressLabels[stage]}</strong><span>{currentProgress}%</span></div>
               <div className="progress-track"><span style={{ width: `${currentProgress}%` }} /></div>
-              {message.samplingSteps && (
-                <div className="sampling-steps-info">
-                  <span>采样步数：{message.currentStep ?? 0} / {message.samplingSteps}</span>
+
+              <div className="progress-details">
+                {message.samplingSteps && (
+                  <div className="progress-detail-item">
+                    <span className="detail-label">采样步数</span>
+                    <span className="detail-value">{message.currentStep ?? 0} / {message.samplingSteps}</span>
+                    {remainingSteps !== null && remainingSteps > 0 && (
+                      <span className="detail-remaining">剩余 {remainingSteps} 步</span>
+                    )}
+                  </div>
+                )}
+                <div className="progress-detail-item">
+                  <span className="detail-label">已用时间</span>
+                  <span className="detail-value">{formatTime(elapsed)}</span>
                 </div>
-              )}
+                {estimatedTime !== null && estimatedTime > 0 && (
+                  <div className="progress-detail-item">
+                    <span className="detail-label">预计剩余</span>
+                    <span className="detail-value">~{formatTime(estimatedTime)}</span>
+                  </div>
+                )}
+              </div>
+
               <div className="progress-steps">{progressLabels.map((label, index) => <span className={index <= stage ? 'active' : ''} key={label}><i>{index < stage || done && index === 3 ? <Check size={9} /> : index + 1}</i>{label}</span>)}</div>
               <p>{message.note || '任务已持久化，你可以继续提交新的任务。'}</p>
               {message.jobId && (
