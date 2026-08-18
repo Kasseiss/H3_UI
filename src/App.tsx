@@ -45,6 +45,7 @@ import {
   Upload,
   Video,
   Volume2,
+  VolumeX,
   WandSparkles,
   X,
   Zap,
@@ -79,6 +80,7 @@ type Message = {
   error?: string
   note?: string
   outputUrl?: string
+  sound?: boolean
 }
 
 type Thread = {
@@ -115,6 +117,7 @@ type ServerJob = {
   prompt: string
   aspect: string
   duration: number
+  sound?: boolean
   status: GenerationStatus
   progress: number
   error?: string
@@ -165,6 +168,14 @@ type HarnessMessage = {
   tools?: string[]
 }
 
+type Account = {
+  id: string
+  username: string
+  displayName: string
+  role: 'admin' | 'user'
+  createdAt: string
+}
+
 const initialThreads: Thread[] = [
   { id: 'draft', title: '未命名创作', meta: '刚刚', accent: 'violet' },
 ]
@@ -205,6 +216,7 @@ function serverMessage(job: ServerJob): Message {
     progress: job.progress,
     aspect: job.aspect,
     duration: job.duration,
+    sound: job.sound !== false,
     createdAt: '已保存',
     jobId: job.id,
     error: job.error,
@@ -213,7 +225,61 @@ function serverMessage(job: ServerJob): Message {
   }
 }
 
+function AuthView({ onAuthenticated }: { onAuthenticated: (account: Account) => void }) {
+  const [mode, setMode] = useState<'login' | 'register'>('login')
+  const [initialized, setInitialized] = useState(true)
+  const [username, setUsername] = useState('')
+  const [displayName, setDisplayName] = useState('')
+  const [password, setPassword] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    fetch('/api/auth/config').then((response) => response.json()).then((data) => {
+      const hasAccounts = Boolean(data.initialized)
+      setInitialized(hasAccounts)
+      setMode(hasAccounts ? 'login' : 'register')
+    }).catch(() => undefined)
+  }, [])
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault()
+    if (busy) return
+    setBusy(true)
+    setError('')
+    try {
+      const response = await fetch(`/api/auth/${mode}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password, displayName }),
+      })
+      const data = await responseJson<{ account: Account }>(response)
+      onAuthenticated(data.account)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '账号操作失败')
+    } finally { setBusy(false) }
+  }
+
+  return (
+    <div className="auth-shell">
+      <div className="auth-card">
+        <div className="auth-brand"><span className="brand-mark"><Sparkles size={20} /></span><div><strong>H3 Studio</strong><small>Creative console</small></div></div>
+        <div className="auth-heading"><span className="eyebrow"><ShieldCheck size={13} />多账号安全空间</span><h1>{mode === 'login' ? '登录你的工作台' : '创建第一个账号'}</h1><p>{mode === 'login' ? '每个账号共享服务器资源，但只显示自己的任务队列。' : '创建后即可管理生成任务、服务器云盘和环境。'}</p></div>
+        <form className="auth-form" onSubmit={submit}>
+          <label className="ui-field"><span>账号名</span><input value={username} onChange={(event) => setUsername(event.target.value)} placeholder="例如：studio-admin" autoComplete="username" required /></label>
+          {mode === 'register' && <label className="ui-field"><span>显示名称</span><input value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder="例如：我的工作台" autoComplete="name" /></label>}
+          <label className="ui-field"><span>密码</span><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="至少 8 位" autoComplete={mode === 'login' ? 'current-password' : 'new-password'} required /></label>
+          {error && <p className="auth-error">{error}</p>}
+          <button className="primary-button auth-submit" disabled={busy}>{busy ? '正在处理…' : mode === 'login' ? '登录 H3 Studio' : '创建账号并进入'}</button>
+        </form>
+        {initialized ? <button className="auth-switch" onClick={() => { setMode(mode === 'login' ? 'register' : 'login'); setError('') }}>{mode === 'login' ? '创建新的账号' : '已有账号，返回登录'}</button> : <p className="auth-first-note">这是当前服务器的第一个账号，将自动成为管理员。</p>}
+      </div>
+    </div>
+  )
+}
+
 function App() {
+  const [account, setAccount] = useState<Account | null | undefined>(undefined)
   const [view, setView] = useState<View>('create')
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [threads, setThreads] = useState<Thread[]>(initialThreads)
@@ -230,7 +296,7 @@ function App() {
   const [driveItems, setDriveItems] = useState<DriveItem[]>(initialDriveItems)
   const [driveSearch, setDriveSearch] = useState('')
   const [driveLayout, setDriveLayout] = useState<'list' | 'grid'>('list')
-  const [drivePath, setDrivePath] = useState('/data/minimax')
+  const [drivePath, setDrivePath] = useState('/')
   const [storageInfo, setStorageInfo] = useState<StorageInfo>({ total: 0, used: 0, free: 0 })
   const [driveConnected, setDriveConnected] = useState(false)
   const [driveReload, setDriveReload] = useState(0)
@@ -240,6 +306,10 @@ function App() {
   const toastTimersRef = useRef<number[]>([])
   const materialInputRef = useRef<HTMLInputElement>(null)
   const driveInputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    fetch('/api/auth/me').then(async (response) => response.ok ? (await response.json()).account as Account : null).then(setAccount).catch(() => setAccount(null))
+  }, [])
 
   const activeMessages = messages[activeThread] ?? []
   const activeTitle = threads.find((thread) => thread.id === activeThread)?.title ?? '未命名创作'
@@ -265,7 +335,7 @@ function App() {
       cancelled = true
       window.clearInterval(timer)
     }
-  }, [])
+  }, [account?.id])
 
   useEffect(() => {
     let cancelled = false
@@ -319,24 +389,24 @@ function App() {
       cancelled = true
       if (timer) window.clearTimeout(timer)
     }
-  }, [])
+  }, [account?.id])
 
   useEffect(() => {
     let cancelled = false
-    const relativePath = drivePath.replace(/^\/data\/minimax\/?/, '')
-    fetch(`/api/storage/list?path=${encodeURIComponent(relativePath)}`)
+    fetch(`/api/storage/list?scope=server&path=${encodeURIComponent(drivePath)}`)
       .then(async (response) => {
         if (!response.ok) throw new Error('云盘接口不可用')
         return response.json()
       })
       .then((data) => {
         if (cancelled) return
-        setDriveItems(data.items.map((item: { id: string; name: string; kind: DriveItem['kind']; size: number; modified: string }) => ({
+        setDriveItems(data.items.map((item: { id: string; name: string; kind: DriveItem['kind']; size: number; modified: string; url?: string }) => ({
           id: item.id,
           name: item.name,
           kind: item.kind,
           size: item.kind === 'folder' ? '—' : formatBytes(item.size),
           modified: new Intl.DateTimeFormat('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date(item.modified)),
+          url: item.url,
         })))
         setStorageInfo(data.storage)
         setDriveConnected(true)
@@ -345,7 +415,7 @@ function App() {
         if (!cancelled) setDriveConnected(false)
       })
     return () => { cancelled = true }
-  }, [drivePath, driveReload])
+  }, [drivePath, driveReload, account?.id])
 
   const showToast = (message: string) => {
     toastTimersRef.current.forEach((timer) => window.clearTimeout(timer))
@@ -462,7 +532,6 @@ function App() {
 
     try {
       const readiness = await responseJson<{ comfy: { connected: boolean }; workflowConfigured: boolean }>(await fetch('/api/health'))
-      if (!readiness.comfy.connected) throw new Error('ComfyUI 暂时未连接，任务未提交')
       if (!readiness.workflowConfigured) throw new Error('尚未配置 H3 API 工作流，请先放入 workflows/h3-api.json')
       const uploaded = []
       for (const [index, attachment] of submittedAttachments.entries()) {
@@ -519,9 +588,8 @@ function App() {
   const uploadToDrive = async (files: File[]) => {
     if (!files.length) return
     try {
-      const relativePath = drivePath.replace(/^\/data\/minimax\/?/, '')
       for (const file of files) {
-        const response = await fetch(`/api/storage/upload?path=${encodeURIComponent(relativePath)}&name=${encodeURIComponent(file.name)}`, {
+        const response = await fetch(`/api/storage/upload?scope=server&path=${encodeURIComponent(drivePath)}&name=${encodeURIComponent(file.name)}`, {
           method: 'PUT',
           headers: { 'Content-Type': file.type || 'application/octet-stream' },
           body: file,
@@ -551,6 +619,43 @@ function App() {
     }
   }
 
+  const downloadDriveItem = async (item: DriveItem) => {
+    if (!item.url) return showToast('这个文件暂时没有可下载地址')
+    try {
+      const response = await fetch(item.url)
+      if (!response.ok) throw new Error('文件下载失败')
+      const blob = await response.blob()
+      const link = document.createElement('a')
+      link.href = URL.createObjectURL(blob)
+      link.download = item.name
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      window.setTimeout(() => URL.revokeObjectURL(link.href), 1000)
+      showToast(`已开始下载：${item.name}`)
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : '文件下载失败')
+    }
+  }
+
+  const downloadGeneration = async () => {
+    const result = [...activeMessages].reverse().find((message) => message.role === 'assistant' && message.status === 'done' && message.outputUrl)
+    if (!result?.outputUrl) return showToast('这个结果还没有可下载的视频')
+    try {
+      const response = await fetch(result.outputUrl)
+      if (!response.ok) throw new Error('视频下载失败')
+      const blob = await response.blob()
+      const link = document.createElement('a')
+      link.href = URL.createObjectURL(blob)
+      link.download = `${result.jobId || 'h3-video'}.mp4`
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      window.setTimeout(() => URL.revokeObjectURL(link.href), 1000)
+      showToast('已开始下载视频')
+    } catch (error) { showToast(error instanceof Error ? error.message : '视频下载失败') }
+  }
+
   const filteredDriveItems = useMemo(
     () => driveItems.filter((item) => item.name.toLowerCase().includes(driveSearch.toLowerCase())),
     [driveItems, driveSearch],
@@ -561,6 +666,14 @@ function App() {
     setView('create')
     setSidebarOpen(false)
   }
+
+  const logout = async () => {
+    await fetch('/api/auth/logout', { method: 'POST' }).catch(() => undefined)
+    setAccount(null)
+  }
+
+  if (account === undefined) return <div className="auth-loading"><Sparkles size={20} /><span>正在连接 H3 Studio…</span></div>
+  if (!account) return <AuthView onAuthenticated={setAccount} />
 
   return (
     <div className="app-shell">
@@ -586,6 +699,8 @@ function App() {
           title={view === 'create' ? activeTitle : view === 'drive' ? '服务器云盘' : '环境部署'}
           onMenu={() => setSidebarOpen(true)}
           comfyStatus={comfyStatus}
+          account={account}
+          onLogout={() => void logout()}
         />
 
         {view === 'create' && (
@@ -630,14 +745,14 @@ function App() {
             onInputChange={handleDriveChange}
             onUpload={(files) => uploadToDrive(files)}
             onFolderOpen={(name) => setDrivePath(`${drivePath}/${name}`)}
-            onHome={() => setDrivePath('/data/minimax')}
+            onHome={() => setDrivePath('/')}
+            onDownload={downloadDriveItem}
             onCreateFolder={async (name) => {
               try {
-                const relativePath = drivePath.replace(/^\/data\/minimax\/?/, '')
                 const response = await fetch('/api/storage/folder', {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ path: relativePath, name }),
+                  body: JSON.stringify({ scope: 'server', path: drivePath, name }),
                 })
                 if (!response.ok) throw new Error('创建失败')
                 setDriveReload((value) => value + 1)
@@ -672,10 +787,12 @@ function App() {
             submitGeneration()
           }}
           onClose={() => setPreviewOpen(false)}
-          onSave={() => {
+          onSave={async () => {
             const result = [...activeMessages].reverse().find((message) => message.role === 'assistant' && message.status === 'done')
-            if (result) void saveGeneration(result)
+            if (result) await saveGeneration(result)
+            else showToast('当前没有可保存的已完成视频')
           }}
+          onDownload={downloadGeneration}
         />
       )}
     </div>
@@ -783,18 +900,19 @@ function Sidebar({
   )
 }
 
-function Topbar({ view, title, onMenu, comfyStatus }: { view: View; title: string; onMenu: () => void; comfyStatus: ComfyStatus }) {
+function Topbar({ view, title, onMenu, comfyStatus, account, onLogout }: { view: View; title: string; onMenu: () => void; comfyStatus: ComfyStatus; account: Account; onLogout: () => void }) {
   return (
     <header className="topbar">
       <div className="topbar-title">
         <button className="icon-button mobile-menu" onClick={onMenu}><Menu size={19} /></button>
         <div>
           <h1>{title}</h1>
-          <p>{view === 'create' ? 'MiniMax H3 · 本地 768P' : view === 'drive' ? '本机文件空间 · /data/minimax' : '本机服务 · 一站式接入'}</p>
+          <p>{view === 'create' ? 'MiniMax H3 · 本地 768P' : view === 'drive' ? '服务器完整文件系统' : '本机服务 · 一站式接入'}</p>
         </div>
       </div>
       <div className="topbar-actions">
         <span className={`server-online ${comfyStatus.connected ? '' : 'disconnected'}`}><span className="pulse" />{comfyStatus.connected ? (comfyStatus.workflowConfigured ? 'H3 就绪' : 'ComfyUI 已连接') : 'ComfyUI 未连接'}</span>
+        <button className="account-pill" onClick={onLogout} title="退出登录"><span>{account.displayName.slice(0, 1).toUpperCase()}</span>{account.displayName}<small>退出</small></button>
       </div>
     </header>
   )
@@ -1037,6 +1155,9 @@ function UserMessage({ message }: { message: Message }) {
 function AssistantMessage({ message, onOpenPreview, onSave }: { message: Message; onOpenPreview: () => void; onSave: (message: Message) => void }) {
   const done = message.status === 'done'
   const failed = message.status === 'failed'
+  const currentProgress = done ? 100 : Math.min(96, Math.max(8, message.progress ?? 8))
+  const stage = done ? 3 : message.status === 'queued' ? 0 : currentProgress < 60 ? 1 : 2
+  const progressLabels = ['排队等待资源', '生成关键帧', '合成视频片段', '完成']
   return (
     <article className="message-row assistant-row">
       <div className="assistant-avatar"><Sparkles size={16} /></div>
@@ -1055,15 +1176,16 @@ function AssistantMessage({ message, onOpenPreview, onSave }: { message: Message
               <span className="scan-line" />
             </div>
             <div className="progress-info">
-              <div><strong>{message.status === 'queued' ? '分析素材与提示词' : (message.progress ?? 0) < 60 ? '生成关键帧' : '合成视频片段'}</strong><span>{message.progress}%</span></div>
-              <div className="progress-track"><span style={{ width: `${message.progress}%` }} /></div>
+              <div className="progress-head"><strong>{progressLabels[stage]}</strong><span>{currentProgress}%</span></div>
+              <div className="progress-track"><span style={{ width: `${currentProgress}%` }} /></div>
+              <div className="progress-steps">{progressLabels.map((label, index) => <span className={index <= stage ? 'active' : ''} key={label}><i>{index < stage || done && index === 3 ? <Check size={9} /> : index + 1}</i>{label}</span>)}</div>
               <p>{message.note || '任务已持久化，你可以继续提交新的任务。'}</p>
             </div>
           </div>
         ) : (
           <div className="result-card">
             <div className="render-preview finished-preview">
-              {message.outputUrl ? <video src={message.outputUrl} muted playsInline preload="metadata" /> : <>
+              {message.outputUrl ? <video src={message.outputUrl} muted={message.sound === false} playsInline preload="metadata" controls /> : <>
                 <div className="moon" />
                 <div className="city city-back" />
                 <div className="city city-front" />
@@ -1096,11 +1218,15 @@ type FocusPreviewProps = {
   onPromptChange: (value: string) => void
   onSubmit: () => void
   onClose: () => void
-  onSave: () => void
+  onSave: () => void | Promise<void>
+  onDownload: () => void | Promise<void>
 }
 
-function FocusPreview({ messages, prompt, aspect, duration, onPromptChange, onSubmit, onClose, onSave }: FocusPreviewProps) {
+function FocusPreview({ messages, prompt, aspect, duration, onPromptChange, onSubmit, onClose, onSave, onDownload }: FocusPreviewProps) {
   const [playing, setPlaying] = useState(true)
+  const [muted, setMuted] = useState(false)
+  const [saveBusy, setSaveBusy] = useState(false)
+  const [moreOpen, setMoreOpen] = useState(false)
   const [zoom, setZoom] = useState(1)
   const [closing, setClosing] = useState(false)
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -1169,9 +1295,10 @@ function FocusPreview({ messages, prompt, aspect, duration, onPromptChange, onSu
             </button>
             <div className="focus-feedback-row">
               <button><Copy size={14} /></button>
-              <button><Volume2 size={14} /></button>
+              <button onClick={() => setMuted((value) => !value)} aria-label={muted ? '打开声音' : '静音'}>{muted ? <VolumeX size={14} /> : <Volume2 size={14} />}</button>
               <button><RotateCcw size={14} /></button>
-              <button><MoreHorizontal size={14} /></button>
+              <button onClick={() => setMoreOpen((value) => !value)} aria-label="更多操作"><MoreHorizontal size={14} /></button>
+              {moreOpen && <div className="focus-more-menu"><button onClick={() => void onDownload()}><Download size={14} />下载视频</button><button onClick={() => setMoreOpen(false)}><Copy size={14} />复制链接</button></div>}
             </div>
           </div>
         </div>
@@ -1211,7 +1338,7 @@ function FocusPreview({ messages, prompt, aspect, duration, onPromptChange, onSu
           </div>
           <div className="stage-actions">
             <span className="saved-state"><Check size={13} />已自动保存</span>
-            <button className="stage-save" onClick={onSave}><Download size={15} />保存</button>
+            <button className="stage-save" disabled={saveBusy} onClick={async () => { if (saveBusy) return; setSaveBusy(true); try { await onSave() } finally { setSaveBusy(false) } }}><Download size={15} />{saveBusy ? '保存中…' : '保存'}</button>
             <i />
             <button className="stage-close" onClick={() => leave(onClose)} aria-label="关闭"><X size={18} /></button>
           </div>
@@ -1220,7 +1347,7 @@ function FocusPreview({ messages, prompt, aspect, duration, onPromptChange, onSu
         <div className="stage-canvas-wrap">
           <div className={`focus-video-canvas ${playing ? 'is-playing' : 'is-paused'}`} style={{ transform: `scale(${zoom})` }}>
             {outputUrl ? (
-              <video ref={videoRef} className="focus-reference-image" src={outputUrl} muted playsInline loop />
+              <video ref={videoRef} className="focus-reference-image" src={outputUrl} muted={muted} playsInline loop />
             ) : referenceImage ? (
               <img className="focus-reference-image" src={referenceImage.url} alt="视频预览" />
             ) : (
@@ -1270,13 +1397,15 @@ type DriveViewProps = {
   onUpload: (files: File[]) => void
   onFolderOpen: (name: string) => void
   onHome: () => void
+  onDownload: (item: DriveItem) => void
   onCreateFolder: (name: string) => void | Promise<void>
 }
 
-function DriveView({ items, search, layout, path, storageInfo, connected, inputRef, onSearch, onLayout, onInputChange, onUpload, onFolderOpen, onHome, onCreateFolder }: DriveViewProps) {
+function DriveView({ items, search, layout, path, storageInfo, connected, inputRef, onSearch, onLayout, onInputChange, onUpload, onFolderOpen, onHome, onDownload, onCreateFolder }: DriveViewProps) {
   const [driveDrag, setDriveDrag] = useState(false)
   const [folderDialogOpen, setFolderDialogOpen] = useState(false)
   const [folderName, setFolderName] = useState('')
+  const [menuId, setMenuId] = useState<string | null>(null)
   const usedPercent = storageInfo.total ? Math.round((storageInfo.used / storageInfo.total) * 100) : 0
   return (
     <div
@@ -1322,22 +1451,27 @@ function DriveView({ items, search, layout, path, storageInfo, connected, inputR
         </div>
 
         <div className="breadcrumb">
-          <button onClick={onHome}><HardDrive size={14} />minimax</button>
-          {path.replace('/data/minimax', '').split('/').filter(Boolean).map((part) => <span key={part}><ChevronRight size={14} />{part}</span>)}
+          <button onClick={onHome}><HardDrive size={14} />服务器根目录</button>
+          {path.split(/[\\/]/).filter(Boolean).slice(-5).map((part, index) => <span key={`${part}-${index}`}><ChevronRight size={14} />{part}</span>)}
         </div>
 
         {layout === 'list' ? (
           <div className="file-table">
             <div className="file-row file-header"><span>名称</span><span>大小</span><span>修改时间</span><span /></div>
             {items.map((item) => (
-              <div className="file-row" key={item.id} onDoubleClick={() => item.kind === 'folder' && onFolderOpen(item.name)}>
+              <div className={`file-row ${menuId === item.id ? 'menu-open' : ''}`} key={item.id} onDoubleClick={() => item.kind === 'folder' && onFolderOpen(item.name)}>
                 <span className="file-name">
                   <FileTypeIcon item={item} />
                   <span><strong>{item.name}</strong><small>{item.kind === 'folder' ? '文件夹' : item.kind === 'video' ? '视频' : item.kind === 'image' ? '图片' : '文件'}</small></span>
                 </span>
                 <span>{item.size}</span>
                 <span>{item.modified}</span>
-                <button className="icon-button"><MoreHorizontal size={17} /></button>
+                <div className="file-row-actions">
+                  <button className="icon-button" onClick={(event) => { event.stopPropagation(); setMenuId(menuId === item.id ? null : item.id) }} aria-label={`更多操作 ${item.name}`}><MoreHorizontal size={17} /></button>
+                  {menuId === item.id && <div className="file-menu" onClick={(event) => event.stopPropagation()}>
+                    {item.kind === 'folder' ? <button onClick={() => { setMenuId(null); onFolderOpen(item.name) }}><FolderOpen size={14} />打开</button> : <button onClick={() => { setMenuId(null); onDownload(item) }}><Download size={14} />下载</button>}
+                  </div>}
+                </div>
               </div>
             ))}
           </div>

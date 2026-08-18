@@ -7,16 +7,19 @@ import path from 'node:path'
 import { Readable, Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { fileURLToPath } from 'node:url'
-import { randomUUID, timingSafeEqual } from 'node:crypto'
+import { randomBytes, randomUUID, scrypt, timingSafeEqual } from 'node:crypto'
+import { promisify } from 'node:util'
 import { createServerHarness } from './lib/server-harness.mjs'
 
 const projectRoot = path.dirname(fileURLToPath(import.meta.url))
 const distRoot = path.join(projectRoot, 'dist')
 const envFilePath = path.resolve(process.env.H3_ENV_FILE || path.join(projectRoot, '.h3.env'))
 const storageRoot = path.resolve(process.env.H3_STORAGE_ROOT || path.join(projectRoot, 'server-storage'))
+const serverBrowserRoot = path.resolve(process.env.H3_SERVER_BROWSER_ROOT || path.parse(projectRoot).root)
 const dataRoot = path.resolve(process.env.H3_DATA_ROOT || path.join(projectRoot, 'data'))
 const logRoot = path.resolve(process.env.H3_LOG_ROOT || path.join(projectRoot, 'logs'))
 const jobStorePath = path.join(dataRoot, 'generations.json')
+const accountsPath = path.join(dataRoot, 'accounts.json')
 const environmentConfigPath = path.join(dataRoot, 'environment.json')
 const workflowPath = path.resolve(process.env.H3_WORKFLOW_PATH || path.join(projectRoot, 'workflows', 'h3-api.json'))
 const bundledWorkflowPath = path.join(projectRoot, 'workflows', 'h3-api.template.json')
@@ -45,6 +48,8 @@ const serviceControlUseSudo = process.env.H3_SERVICE_CONTROL_USE_SUDO === '1'
 const autoStartComfy = process.env.H3_AUTO_START_COMFYUI !== '0'
 const maxUploadBytes = Number(process.env.H3_MAX_UPLOAD_BYTES || 4 * 1024 * 1024 * 1024)
 const minimumFreeBytes = Number(process.env.H3_MIN_FREE_BYTES || 2 * 1024 * 1024 * 1024)
+const accountQueuePreview = Math.min(20, Math.max(1, Number.parseInt(process.env.H3_ACCOUNT_QUEUE_PREVIEW || '5', 10) || 5))
+const maxConcurrentJobs = Math.min(8, Math.max(1, Number.parseInt(process.env.H3_MAX_CONCURRENT_JOBS || '1', 10) || 1))
 const comfyManagerLogPath = path.join(logRoot, 'comfy-manager.log')
 const harnessConfig = {
   apiBase: String(process.env.H3_HARNESS_API_BASE || '').trim(),
@@ -75,7 +80,11 @@ const dimensions = {
 }
 
 let jobs = []
+let accounts = []
+const sessions = new Map()
 let persistChain = Promise.resolve()
+let accountPersistChain = Promise.resolve()
+let schedulerChain = Promise.resolve()
 let comfyControlChain = Promise.resolve()
 let shuttingDown = false
 
@@ -146,13 +155,95 @@ function persistJobs() {
   return persistChain
 }
 
+const scryptAsync = promisify(scrypt)
+
+function accountView(account) {
+  if (!account) return null
+  return { id: account.id, username: account.username, displayName: account.displayName, role: account.role, createdAt: account.createdAt }
+}
+
+function normalizeUsername(value) {
+  const username = String(value || '').trim().toLowerCase()
+  if (!/^[a-zA-Z0-9_.-]{2,32}$/.test(username)) throw new Error('账号名需为 2-32 位字母、数字、下划线、点或短横线')
+  return username
+}
+
+function validatePassword(value) {
+  const password = String(value || '')
+  if (password.length < 8 || password.length > 200) throw new Error('密码长度需要为 8-200 位')
+  return password
+}
+
+async function hashPassword(password, salt = randomBytes(16).toString('hex')) {
+  const derived = await scryptAsync(password, salt, 64)
+  return `${salt}:${Buffer.from(derived).toString('hex')}`
+}
+
+async function verifyPassword(password, encoded) {
+  const [salt, expectedHex] = String(encoded || '').split(':')
+  if (!salt || !expectedHex) return false
+  const actual = Buffer.from(await scryptAsync(password, salt, 64))
+  const expected = Buffer.from(expectedHex, 'hex')
+  return actual.length === expected.length && actual.length > 0 && timingSafeEqual(actual, expected)
+}
+
+function persistAccounts() {
+  accountPersistChain = accountPersistChain
+    .catch(() => undefined)
+    .then(() => atomicWrite(accountsPath, JSON.stringify({ version: 1, accounts }, null, 2)))
+  return accountPersistChain
+}
+
+try {
+  const storedAccounts = JSON.parse(await readFile(accountsPath, 'utf8'))
+  accounts = Array.isArray(storedAccounts.accounts) ? storedAccounts.accounts : []
+} catch (error) {
+  if (error?.code !== 'ENOENT') await log('error', 'account_store_read_failed', { message: error.message })
+  await persistAccounts()
+}
+
+function parseCookies(req) {
+  return Object.fromEntries(String(req.headers.cookie || '').split(';').map((part) => part.trim().split('=')) .filter(([key, value]) => key && value).map(([key, ...rest]) => [key, decodeURIComponent(rest.join('='))]))
+}
+
+function currentAccount(req) {
+  const token = parseCookies(req).h3_session
+  if (!token) return null
+  const session = sessions.get(token)
+  if (!session || session.expiresAt < Date.now()) {
+    sessions.delete(token)
+    return null
+  }
+  return accounts.find((account) => account.id === session.accountId) || null
+}
+
+function issueSession(res, account) {
+  const token = randomBytes(32).toString('hex')
+  sessions.set(token, { accountId: account.id, expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000 })
+  res.setHeader('Set-Cookie', `h3_session=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${7 * 24 * 60 * 60}`)
+}
+
+function clearSession(req, res) {
+  const token = parseCookies(req).h3_session
+  if (token) sessions.delete(token)
+  res.setHeader('Set-Cookie', 'h3_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0')
+}
+
+function serverResolve(input = '') {
+  const value = String(input || '')
+  const target = path.resolve(path.isAbsolute(value) ? value : path.join(serverBrowserRoot, value))
+  if (serverBrowserRoot !== path.parse(serverBrowserRoot).root && target !== serverBrowserRoot && !target.startsWith(`${serverBrowserRoot}${path.sep}`)) throw new Error('请求路径超出服务器根目录')
+  return target
+}
+
 try {
   const stored = JSON.parse(await readFile(jobStorePath, 'utf8'))
   jobs = Array.isArray(stored.jobs) ? stored.jobs : []
   const now = new Date().toISOString()
   jobs = jobs.map((job) => ['queued', 'generating'].includes(job.status)
-    ? { ...job, status: 'queued', updatedAt: now, note: '服务重启后已恢复监听' }
+    ? { ...job, status: job.promptId ? 'generating' : 'queued', updatedAt: now, note: '服务重启后已恢复监听' }
     : job)
+  if (accounts[0]) jobs = jobs.map((job) => job.accountId ? job : { ...job, accountId: accounts[0].id })
   await persistJobs()
 } catch (error) {
   if (error?.code !== 'ENOENT') await log('error', 'job_store_read_failed', { message: error.message })
@@ -209,22 +300,25 @@ async function readJson(req) {
   }
 }
 
-async function listStorage(relativePath) {
-  const directory = safeResolve(storageRoot, relativePath)
+async function listStorage(relativePath, scope = 'storage') {
+  const directory = scope === 'server' ? serverResolve(relativePath || serverBrowserRoot) : safeResolve(storageRoot, relativePath)
   const directoryStat = await stat(directory)
   if (!directoryStat.isDirectory()) throw new Error('目标不是文件夹')
   const entries = (await readdir(directory, { withFileTypes: true })).filter((entry) => !entry.name.startsWith('.'))
-  const items = await Promise.all(entries.map(async (entry) => {
-    const itemPath = path.join(directory, entry.name)
-    const itemStat = await stat(itemPath)
-    const relative = path.relative(storageRoot, itemPath).split(path.sep).join('/')
-    return { id: relative, name: entry.name, path: relative, kind: itemKind(entry.name, entry.isDirectory()), size: entry.isDirectory() ? 0 : itemStat.size, modified: itemStat.mtime.toISOString() }
-  }))
+  const items = (await Promise.all(entries.map(async (entry) => {
+    try {
+      const itemPath = path.join(directory, entry.name)
+      const itemStat = await stat(itemPath)
+      const itemValue = scope === 'server' ? itemPath : path.relative(storageRoot, itemPath).split(path.sep).join('/')
+      const downloadPath = encodeURIComponent(itemValue)
+      return { id: itemValue, name: entry.name, path: itemValue, kind: itemKind(entry.name, entry.isDirectory()), size: entry.isDirectory() ? 0 : itemStat.size, modified: itemStat.mtime.toISOString(), url: entry.isDirectory() ? undefined : `/api/storage/download?scope=${scope}&path=${downloadPath}` }
+    } catch { return null }
+  }))).filter(Boolean)
   items.sort((a, b) => a.kind === 'folder' && b.kind !== 'folder' ? -1 : a.kind !== 'folder' && b.kind === 'folder' ? 1 : b.modified.localeCompare(a.modified))
-  const disk = await statfs(storageRoot)
+  const disk = await statfs(directory)
   const total = Number(disk.blocks * disk.bsize)
   const free = Number(disk.bavail * disk.bsize)
-  return { path: relativePath || '', items, storage: { total, free, used: Math.max(0, total - free) } }
+  return { path: scope === 'server' ? (directory === serverBrowserRoot ? serverBrowserRoot : directory) : (relativePath || ''), root: scope === 'server' ? serverBrowserRoot : storageRoot, scope, items, storage: { total, free, used: Math.max(0, total - free) } }
 }
 
 async function probeComfyUrl(target, timeout = 1200) {
@@ -722,7 +816,7 @@ function pruneUnresolvedWorkflow(graph) {
   return result
 }
 
-async function submitGeneration(body) {
+async function submitGeneration(body, account) {
   const prompt = String(body.prompt || '').trim()
   const aspect = Object.hasOwn(dimensions, body.aspect) ? body.aspect : '16:9'
   const duration = Math.min(15, Math.max(5, Number.parseInt(body.duration, 10) || 5))
@@ -777,26 +871,72 @@ async function submitGeneration(body) {
   if (body.sound === false) {
     for (const node of Object.values(graph)) if (node?.class_type === 'CreateVideo') delete node.inputs.audio
   }
+  const now = new Date().toISOString()
+  const job = {
+    id: randomUUID(), promptId: null, accountId: account.id, conversationId: String(body.conversationId || `conversation-${Date.now()}`),
+    prompt, aspect, duration, sound: body.sound !== false, seed, status: 'queued', progress: 8,
+    attachments: Array.isArray(body.attachments) ? body.attachments.slice(0, 15) : [], outputs: [], workflow: graph, createdAt: now, updatedAt: now,
+  }
+  jobs.unshift(job)
+  jobs = jobs.slice(0, 500)
+  await persistJobs()
+  await log('info', 'generation_queued', { jobId: job.id, accountId: account.id, aspect, duration })
+  void scheduleJobs()
+  return job
+}
+
+async function comfyQueueHasCapacity() {
+  try {
+    const response = await fetch(`${comfyUrl}/queue`, { signal: AbortSignal.timeout(2500) })
+    if (!response.ok) return false
+    const queue = await response.json()
+    const running = Array.isArray(queue.queue_running) ? queue.queue_running.length : 0
+    const pending = Array.isArray(queue.queue_pending) ? queue.queue_pending.length : 0
+    return running + pending < maxConcurrentJobs
+  } catch { return false }
+}
+
+async function dispatchJob(job) {
+  if (!job.workflow || job.promptId) return false
+  if (!await comfyQueueHasCapacity()) return false
   const response = await fetch(`${comfyUrl}/prompt`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ prompt: graph, client_id: 'h3-studio' }),
+    body: JSON.stringify({ prompt: job.workflow, client_id: 'h3-studio' }),
     signal: AbortSignal.timeout(12000),
   })
   if (!response.ok) throw new Error(`ComfyUI 拒绝任务 (${response.status})`)
   const result = await response.json()
   if (!result.prompt_id) throw new Error('ComfyUI 未返回任务编号')
-  const now = new Date().toISOString()
-  const job = {
-    id: randomUUID(), promptId: result.prompt_id, conversationId: String(body.conversationId || `conversation-${Date.now()}`),
-    prompt, aspect, duration, sound: body.sound !== false, seed, status: 'queued', progress: 8,
-    attachments: Array.isArray(body.attachments) ? body.attachments.slice(0, 15) : [], outputs: [], createdAt: now, updatedAt: now,
-  }
-  jobs.unshift(job)
-  jobs = jobs.slice(0, 500)
+  job.promptId = result.prompt_id
+  delete job.workflow
+  job.status = 'generating'
+  job.progress = Math.max(15, job.progress || 8)
+  job.note = '已分配给 ComfyUI，正在生成'
+  job.updatedAt = new Date().toISOString()
   await persistJobs()
-  await log('info', 'generation_submitted', { jobId: job.id, promptId: job.promptId, aspect, duration })
-  return job
+  await log('info', 'generation_dispatched', { jobId: job.id, promptId: job.promptId, accountId: job.accountId })
+  return true
+}
+
+function scheduleJobs() {
+  schedulerChain = schedulerChain.catch(() => undefined).then(async () => {
+    for (let attempt = 0; attempt < maxConcurrentJobs; attempt += 1) {
+      const candidate = jobs
+        .filter((job) => job.status === 'queued' && !job.promptId && job.workflow)
+        .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt))[0]
+      if (!candidate) break
+      try {
+        if (!await dispatchJob(candidate)) break
+      } catch (error) {
+        candidate.note = error instanceof Error ? error.message : '等待 ComfyUI 资源'
+        candidate.updatedAt = new Date().toISOString()
+        await persistJobs()
+        break
+      }
+    }
+  })
+  return schedulerChain
 }
 
 function collectOutputs(history) {
@@ -815,6 +955,7 @@ function collectOutputs(history) {
 
 async function refreshJob(job) {
   if (!['queued', 'generating'].includes(job.status)) return job
+  if (!job.promptId) return job
   try {
     const response = await fetch(`${comfyUrl}/history/${encodeURIComponent(job.promptId)}`, { signal: AbortSignal.timeout(4000) })
     if (!response.ok) throw new Error(`history ${response.status}`)
@@ -826,6 +967,7 @@ async function refreshJob(job) {
       job.progress = failed ? job.progress : 100
       job.error = failed ? 'ComfyUI 执行失败，请查看服务日志' : undefined
       job.outputs = collectOutputs(history)
+      void scheduleJobs()
     } else if (Date.now() - Date.parse(job.createdAt) > 2500) {
       job.status = 'generating'
       job.progress = Math.min(92, Math.max(job.progress || 8, 24))
@@ -977,7 +1119,61 @@ function validateHarnessConfigInput(body) {
   return { apiBase, model }
 }
 
+function visibleJobsForAccount(accountId) {
+  const own = jobs.filter((job) => job.accountId === accountId)
+  const pending = own.filter((job) => ['queued', 'generating'].includes(job.status)).sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt))
+  const visiblePending = new Set(pending.slice(0, accountQueuePreview).map((job) => job.id))
+  return own.filter((job) => !['queued', 'generating'].includes(job.status) || visiblePending.has(job.id))
+}
+
+function requireAccount(req, res) {
+  const account = currentAccount(req)
+  if (!account) {
+    json(res, 401, { error: '请先登录 H3 Studio' })
+    return null
+  }
+  return account
+}
+
 async function handleApi(req, res, url) {
+  if (req.method === 'GET' && url.pathname === '/api/auth/config') return json(res, 200, { initialized: accounts.length > 0 })
+
+  if (req.method === 'GET' && url.pathname === '/api/auth/me') {
+    const account = currentAccount(req)
+    return account ? json(res, 200, { account: accountView(account) }) : json(res, 401, { error: '未登录' })
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/auth/register') {
+    const body = await readJson(req)
+    const username = normalizeUsername(body.username)
+    const password = validatePassword(body.password)
+    if (accounts.some((account) => account.username === username)) return json(res, 409, { error: '这个账号名已经存在' })
+    const account = { id: randomUUID(), username, displayName: String(body.displayName || username).trim().slice(0, 40) || username, role: accounts.length ? 'user' : 'admin', passwordHash: await hashPassword(password), createdAt: new Date().toISOString() }
+    accounts.push(account)
+    if (accounts.length === 1) jobs = jobs.map((job) => job.accountId ? job : { ...job, accountId: account.id })
+    await persistAccounts()
+    await persistJobs()
+    issueSession(res, account)
+    await log('info', 'account_registered', { accountId: account.id, username: account.username, role: account.role })
+    return json(res, 201, { account: accountView(account) })
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/auth/login') {
+    const body = await readJson(req)
+    const username = normalizeUsername(body.username)
+    const password = validatePassword(body.password)
+    const account = accounts.find((candidate) => candidate.username === username)
+    if (!account || !await verifyPassword(password, account.passwordHash)) return json(res, 401, { error: '账号名或密码不正确' })
+    issueSession(res, account)
+    await log('info', 'account_login', { accountId: account.id, username: account.username })
+    return json(res, 200, { account: accountView(account) })
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/auth/logout') {
+    clearSession(req, res)
+    return json(res, 200, { ok: true })
+  }
+
   if (req.method === 'GET' && url.pathname === '/api/health') {
     let comfy = { connected: false }
     try { comfy = await comfyStatus() } catch { /* health remains available */ }
@@ -1088,25 +1284,34 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === 'GET' && url.pathname === '/api/generations') {
-    await Promise.all(jobs.filter((job) => ['queued', 'generating'].includes(job.status)).slice(0, 12).map(refreshJob))
-    return json(res, 200, { jobs })
+    const account = requireAccount(req, res)
+    if (!account) return
+    await scheduleJobs()
+    await Promise.all(jobs.filter((job) => job.accountId === account.id && ['queued', 'generating'].includes(job.status)).slice(0, 12).map(refreshJob))
+    return json(res, 200, { jobs: visibleJobsForAccount(account.id), queue: { preview: accountQueuePreview, total: jobs.filter((job) => ['queued', 'generating'].includes(job.status)).length } })
   }
 
   if (req.method === 'POST' && url.pathname === '/api/generations') {
-    return json(res, 202, { job: await submitGeneration(await readJson(req)) })
+    const account = requireAccount(req, res)
+    if (!account) return
+    return json(res, 202, { job: await submitGeneration(await readJson(req), account) })
   }
 
   const jobMatch = url.pathname.match(/^\/api\/generations\/([^/]+)$/)
   if (req.method === 'GET' && jobMatch) {
+    const account = requireAccount(req, res)
+    if (!account) return
     const job = jobs.find((item) => item.id === jobMatch[1])
-    if (!job) return json(res, 404, { error: '任务不存在' })
+    if (!job || job.accountId !== account.id) return json(res, 404, { error: '任务不存在' })
     return json(res, 200, { job: await refreshJob(job) })
   }
 
   const saveMatch = url.pathname.match(/^\/api\/generations\/([^/]+)\/save$/)
   if (req.method === 'POST' && saveMatch) {
+    const account = requireAccount(req, res)
+    if (!account) return
     const job = jobs.find((item) => item.id === saveMatch[1])
-    if (!job || job.status !== 'done') return json(res, 404, { error: '已完成任务不存在' })
+    if (!job || job.accountId !== account.id || job.status !== 'done') return json(res, 404, { error: '已完成任务不存在' })
     const output = job.outputs?.find((item) => ['videos', 'gifs'].includes(item.kind)) || job.outputs?.[0]
     if (!output) throw new Error('任务没有可保存的输出文件')
     const query = new URLSearchParams({ filename: output.filename, subfolder: output.subfolder || '', type: output.type || 'output' })
@@ -1138,6 +1343,8 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === 'POST' && url.pathname === '/api/comfy/upload') {
+    const account = requireAccount(req, res)
+    if (!account) return
     const contentType = String(req.headers['content-type'] || '')
     const declaredSize = Number(req.headers['content-length'] || 0)
     if (!contentType.startsWith('multipart/form-data')) throw new Error('素材上传格式不合法')
@@ -1161,21 +1368,34 @@ async function handleApi(req, res, url) {
     return json(res, 201, result)
   }
 
-  if (req.method === 'GET' && url.pathname === '/api/storage/list') return json(res, 200, await listStorage(url.searchParams.get('path') || ''))
+  if (req.method === 'GET' && url.pathname === '/api/storage/list') {
+    const account = requireAccount(req, res)
+    if (!account) return
+    const scope = url.searchParams.get('scope') === 'server' ? 'server' : 'storage'
+    return json(res, 200, await listStorage(url.searchParams.get('path') || '', scope))
+  }
 
   if (req.method === 'POST' && url.pathname === '/api/storage/folder') {
+    const account = requireAccount(req, res)
+    if (!account) return
     const body = await readJson(req)
-    const parent = safeResolve(storageRoot, body.path || '')
-    const folder = safeResolve(parent, safeName(body.name))
+    const scope = body.scope === 'server' ? 'server' : 'storage'
+    const parent = scope === 'server' ? serverResolve(body.path || serverBrowserRoot) : safeResolve(storageRoot, body.path || '')
+    const folder = path.join(parent, safeName(body.name))
+    if (scope !== 'server' && !folder.startsWith(`${storageRoot}${path.sep}`)) throw new Error('创建路径不合法')
     await mkdir(folder, { recursive: false })
     return json(res, 201, { ok: true })
   }
 
   if (req.method === 'PUT' && url.pathname === '/api/storage/upload') {
+    const account = requireAccount(req, res)
+    if (!account) return
     const declaredSize = Number(req.headers['content-length'] || 0)
     if (declaredSize > maxUploadBytes) return json(res, 413, { error: '文件超过服务器上传限制' })
-    const parent = safeResolve(storageRoot, url.searchParams.get('path') || '')
-    const target = safeResolve(parent, safeName(url.searchParams.get('name')))
+    const scope = url.searchParams.get('scope') === 'server' ? 'server' : 'storage'
+    const parent = scope === 'server' ? serverResolve(url.searchParams.get('path') || serverBrowserRoot) : safeResolve(storageRoot, url.searchParams.get('path') || '')
+    const target = path.join(parent, safeName(url.searchParams.get('name')))
+    if (scope !== 'server' && !target.startsWith(`${storageRoot}${path.sep}`)) throw new Error('上传路径不合法')
     if (path.dirname(target) !== parent) throw new Error('上传路径不合法')
     const temporary = path.join(parent, `.${path.basename(target)}.${randomUUID()}.uploading`)
     let received = 0
@@ -1192,18 +1412,22 @@ async function handleApi(req, res, url) {
       await unlink(temporary).catch(() => undefined)
       throw error
     }
-    await log('info', 'storage_upload', { path: path.relative(storageRoot, target), bytes: received })
-    return json(res, 201, { ok: true, bytes: received, path: path.relative(storageRoot, target).split(path.sep).join('/') })
+    const displayPath = scope === 'server' ? target : path.relative(storageRoot, target).split(path.sep).join('/')
+    await log('info', 'storage_upload', { scope, path: displayPath, bytes: received, accountId: account.id })
+    return json(res, 201, { ok: true, bytes: received, path: displayPath })
   }
 
   if (req.method === 'GET' && url.pathname === '/api/storage/download') {
-    const target = safeResolve(storageRoot, url.searchParams.get('path') || '')
+    const account = requireAccount(req, res)
+    if (!account) return
+    const scope = url.searchParams.get('scope') === 'server' ? 'server' : 'storage'
+    const target = scope === 'server' ? serverResolve(url.searchParams.get('path') || '') : safeResolve(storageRoot, url.searchParams.get('path') || '')
     const fileStat = await stat(target)
     if (!fileStat.isFile()) throw new Error('目标不是文件')
     res.writeHead(200, {
       'Content-Type': mimeTypes[path.extname(target).toLowerCase()] || 'application/octet-stream',
       'Content-Length': fileStat.size,
-      'Content-Disposition': `inline; filename*=UTF-8''${encodeURIComponent(path.basename(target))}`,
+      'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(path.basename(target))}`,
     })
     return pipeline(createReadStream(target), res)
   }
@@ -1256,6 +1480,7 @@ server.requestTimeout = 15 * 60_000
 
 server.listen(port, host, () => {
   void log('info', 'server_started', { url: `http://${host}:${port}`, storageRoot, comfyUrl, workflowPath })
+  setTimeout(() => void scheduleJobs(), 800).unref()
   if (autoStartComfy) setTimeout(() => void autoStartComfyService(), 1500).unref()
 })
 
