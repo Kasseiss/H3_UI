@@ -42,6 +42,7 @@ const serviceControlEnabled = process.env.H3_ALLOW_SERVICE_CONTROL === '1'
 const serviceControlUseSudo = process.env.H3_SERVICE_CONTROL_USE_SUDO === '1'
 const autoStartComfy = process.env.H3_AUTO_START_COMFYUI !== '0'
 const maxUploadBytes = Number(process.env.H3_MAX_UPLOAD_BYTES || 4 * 1024 * 1024 * 1024)
+const minimumFreeBytes = Number(process.env.H3_MIN_FREE_BYTES || 2 * 1024 * 1024 * 1024)
 const comfyManagerLogPath = path.join(logRoot, 'comfy-manager.log')
 const startedAt = new Date().toISOString()
 
@@ -535,7 +536,6 @@ async function environmentStatus() {
   try { await access(storageRoot, fsConstants.R_OK | fsConstants.W_OK) } catch { storageWritable = false }
   const disk = await statfs(storageRoot)
   const freeBytes = Number(disk.bavail * disk.bsize)
-  const minimumFreeBytes = Number(process.env.H3_MIN_FREE_BYTES || 2 * 1024 * 1024 * 1024)
   const storageReady = storageWritable && freeBytes >= minimumFreeBytes
   const components = [
     { id: 'web', name: 'H3 网页服务', status: 'ready', detail: `Node ${process.version} · ${host}:${port}` },
@@ -548,6 +548,7 @@ async function environmentStatus() {
   return {
     ready: comfy.connected && workflow && storageReady,
     platform: `${process.platform} ${process.arch}`,
+    comfyUrl,
     uptime: Math.floor(process.uptime()),
     checkedAt: new Date().toISOString(),
     components,
@@ -693,6 +694,13 @@ async function submitGeneration(body) {
   const aspect = Object.hasOwn(dimensions, body.aspect) ? body.aspect : '16:9'
   const duration = Math.min(15, Math.max(5, Number.parseInt(body.duration, 10) || 5))
   if (!prompt && (!Array.isArray(body.attachments) || body.attachments.length === 0)) throw new Error('请输入提示词或添加参考素材')
+  const disk = await statfs(storageRoot)
+  const freeBytes = Number(disk.bavail * disk.bsize)
+  if (freeBytes < minimumFreeBytes) {
+    const error = new Error(`服务器空间不足，至少需要保留 ${Math.ceil(minimumFreeBytes / 1024 / 1024 / 1024)} GB`)
+    error.code = 'INSUFFICIENT_STORAGE'
+    throw error
+  }
   const selectedWorkflowPath = await activeWorkflowPath()
   if (!selectedWorkflowPath) {
     const error = new Error('尚未配置 H3 API 工作流，请将 ComfyUI API 格式工作流放到 workflows/h3-api.json')

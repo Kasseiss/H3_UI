@@ -12,6 +12,7 @@ import {
   Copy,
   Cpu,
   Download,
+  ExternalLink,
   File,
   FileImage,
   FileVideo,
@@ -131,6 +132,7 @@ type EnvironmentComponent = {
 type EnvironmentStatus = {
   ready: boolean
   platform: string
+  comfyUrl?: string
   uptime: number
   checkedAt: string
   components: EnvironmentComponent[]
@@ -1421,6 +1423,13 @@ function EnvironmentView({ onToast }: { onToast: (message: string) => void }) {
   const autoStartRef = useRef(false)
   const comfyComponent = status?.components.find((component) => component.id === 'comfy')
   const comfyRunning = comfyComponent?.status === 'ready'
+  const comfyAccessUrl = useMemo(() => {
+    if (!status?.comfyUrl) return ''
+    try {
+      const target = new URL(status.comfyUrl)
+      return `${window.location.protocol}//${window.location.hostname}${target.port ? `:${target.port}` : ''}`
+    } catch { return '' }
+  }, [status?.comfyUrl])
 
   const refreshStatus = async (quiet = false) => {
     if (!quiet) setLoading(true)
@@ -1564,6 +1573,7 @@ function EnvironmentView({ onToast }: { onToast: (message: string) => void }) {
         <header>
           <div className="terminal-title"><span className="terminal-dots"><i /><i /><i /></span><div><strong>ComfyUI / H3 实例终端</strong><small>受控运维通道 · 本机执行</small></div><span className={`terminal-runtime ${comfyRunning ? 'online' : ''}`}><i />{comfyRunning ? '实例运行中' : '等待实例'}</span></div>
           <div className="terminal-header-actions">
+            {comfyRunning && comfyAccessUrl && <a href={comfyAccessUrl} target="_blank" rel="noreferrer"><ExternalLink size={14} />打开 ComfyUI</a>}
             {!comfyRunning && <button onClick={() => void controlComfyService('start')} disabled={serviceBusy}><Play size={14} />启动</button>}
             {comfyRunning && <button onClick={() => setServiceAction('restart')} disabled={serviceBusy}><RotateCcw size={14} />重启</button>}
             {comfyRunning && <button className="danger" onClick={() => setServiceAction('stop')} disabled={serviceBusy}><Square size={13} />停止</button>}

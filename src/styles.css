@@ -1605,8 +1605,8 @@ select:focus-visible {
 .terminal-runtime i { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
 .terminal-runtime.online { color: #24794e; background: #e4f6eb; }
 .terminal-header-actions { display: flex; gap: 5px; }
-.terminal-header-actions button { display: inline-flex; min-height: 30px; align-items: center; padding: 0 9px; cursor: pointer; color: #65656d; font-size: 8px; font-weight: 650; border: 1px solid #dfdfdc; border-radius: 7px; background: #fff; gap: 4px; transition: 150ms ease; }
-.terminal-header-actions button:hover { color: #4e4fc2; border-color: #cfcfeb; background: #f8f8ff; transform: translateY(-1px); }
+.terminal-header-actions button, .terminal-header-actions a { display: inline-flex; min-height: 30px; align-items: center; padding: 0 9px; cursor: pointer; color: #65656d; font-size: 8px; font-weight: 650; text-decoration: none; border: 1px solid #dfdfdc; border-radius: 7px; background: #fff; gap: 4px; transition: 150ms ease; }
+.terminal-header-actions button:hover, .terminal-header-actions a:hover { color: #4e4fc2; border-color: #cfcfeb; background: #f8f8ff; transform: translateY(-1px); }
 .terminal-header-actions button.danger { color: #be4f59; border-color: #f0cfd2; }
 .terminal-header-actions button.danger:hover { background: #fff5f6; }
 .terminal-header-actions button:disabled { cursor: wait; opacity: .45; transform: none; }
@@ -2043,7 +2043,7 @@ select:focus-visible {
   .environment-grid { grid-template-columns: 1fr; }
   .ui-terminal-panel > header { align-items: flex-start; flex-direction: column; gap: 9px; }
   .terminal-header-actions { width: 100%; overflow-x: auto; }
-  .terminal-header-actions button { flex: 1 0 auto; justify-content: center; }
+  .terminal-header-actions button, .terminal-header-actions a { flex: 1 0 auto; justify-content: center; }
   .terminal-runtime { display: none; }
   .terminal-shortcuts { overflow-x: auto; }
   .terminal-output { height: 360px; font-size: 9px; }
