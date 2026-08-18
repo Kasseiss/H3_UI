@@ -72,6 +72,7 @@ npm run start
 
 - `server-storage`：素材、模型缓存和生成结果
 - `data/generations.json`：持久化任务状态
+- `data/environment.json`：首次找到或自动启动 ComfyUI 后保存的连接地址与服务配置，重启后自动复用
 - `logs/h3-YYYY-MM-DD.log`：JSON 行格式运行日志
 
 健康检查：`GET /api/health`

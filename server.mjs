@@ -14,12 +14,22 @@ const storageRoot = path.resolve(process.env.H3_STORAGE_ROOT || path.join(projec
 const dataRoot = path.resolve(process.env.H3_DATA_ROOT || path.join(projectRoot, 'data'))
 const logRoot = path.resolve(process.env.H3_LOG_ROOT || path.join(projectRoot, 'logs'))
 const jobStorePath = path.join(dataRoot, 'generations.json')
+const environmentConfigPath = path.join(dataRoot, 'environment.json')
 const workflowPath = path.resolve(process.env.H3_WORKFLOW_PATH || path.join(projectRoot, 'workflows', 'h3-api.json'))
 const port = Number(process.env.H3_PORT || 12233)
 const host = process.env.H3_HOST || '0.0.0.0'
-const comfyUrl = (process.env.COMFYUI_URL || 'http://127.0.0.1:12234').replace(/\/+$/, '')
-const comfyServiceName = /^[a-zA-Z0-9_.@-]+$/.test(process.env.COMFYUI_SERVICE_NAME || '') ? process.env.COMFYUI_SERVICE_NAME : 'comfyui.service'
-const comfyServiceScope = process.env.COMFYUI_SERVICE_SCOPE === 'user' ? 'user' : 'system'
+let savedEnvironmentConfig = {}
+try {
+  savedEnvironmentConfig = JSON.parse(await readFile(environmentConfigPath, 'utf8'))
+} catch (error) {
+  if (error?.code !== 'ENOENT') console.warn(`环境配置读取失败: ${error.message}`)
+}
+const configuredComfyUrl = process.env.COMFYUI_URL || savedEnvironmentConfig.comfyUrl || 'http://127.0.0.1:12234'
+const comfyUrl = configuredComfyUrl.replace(/\/+$/, '')
+const configuredServiceName = process.env.COMFYUI_SERVICE_NAME || savedEnvironmentConfig.comfyServiceName || 'comfyui.service'
+const comfyServiceName = /^[a-zA-Z0-9_.@-]+$/.test(configuredServiceName) ? configuredServiceName : 'comfyui.service'
+const configuredServiceScope = process.env.COMFYUI_SERVICE_SCOPE || savedEnvironmentConfig.comfyServiceScope || 'system'
+const comfyServiceScope = configuredServiceScope === 'user' ? 'user' : 'system'
 const serviceControlEnabled = process.env.H3_ALLOW_SERVICE_CONTROL === '1'
 const serviceControlUseSudo = process.env.H3_SERVICE_CONTROL_USE_SUDO === '1'
 const autoStartComfy = process.env.H3_AUTO_START_COMFYUI !== '0'
@@ -65,6 +75,19 @@ async function atomicWrite(target, value) {
   const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`
   await writeFile(temporary, value, 'utf8')
   await rename(temporary, target)
+}
+
+let environmentConfigChain = Promise.resolve()
+function persistEnvironmentConfig(patch = {}) {
+  savedEnvironmentConfig = { ...savedEnvironmentConfig, ...patch, updatedAt: new Date().toISOString() }
+  environmentConfigChain = environmentConfigChain
+    .catch(() => undefined)
+    .then(() => atomicWrite(environmentConfigPath, JSON.stringify(savedEnvironmentConfig, null, 2)))
+  return environmentConfigChain
+}
+
+async function rememberComfyConfig(source) {
+  await persistEnvironmentConfig({ comfyUrl, comfyServiceName, comfyServiceScope, source })
 }
 
 function persistJobs() {
@@ -199,7 +222,8 @@ async function autoStartComfyService() {
   if (!autoStartComfy || process.platform !== 'linux') return { type: 'info', text: '当前环境未启用自动启动', time: new Date().toISOString() }
   try {
     await comfyStatus(1200)
-    return { type: 'success', text: 'ComfyUI 已在运行，无需启动', time: new Date().toISOString() }
+    await rememberComfyConfig('connected')
+    return { type: 'success', text: 'ComfyUI 已在运行，配置已保存', time: new Date().toISOString() }
   } catch {
     try {
       const started = await controlComfyService('start')
@@ -207,7 +231,8 @@ async function autoStartComfyService() {
         await new Promise((resolve) => setTimeout(resolve, 1000))
         try {
           await comfyStatus(1500)
-          return { ...started, text: 'ComfyUI 已自动启动并连接' }
+          await rememberComfyConfig('auto-started')
+          return { ...started, text: 'ComfyUI 已自动启动并连接，配置已保存' }
         } catch { /* keep waiting for the service */ }
       }
       return { type: 'warning', text: '已发送 ComfyUI 启动命令，但服务尚未响应', time: new Date().toISOString() }
@@ -436,6 +461,16 @@ async function handleApi(req, res, url) {
 
   if (req.method === 'GET' && url.pathname === '/api/environment/status') {
     return json(res, 200, await environmentStatus())
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/environment/config') {
+    return json(res, 200, {
+      comfyUrl,
+      comfyServiceName,
+      comfyServiceScope,
+      autoStartComfy,
+      savedAt: savedEnvironmentConfig.updatedAt || null,
+    })
   }
 
   if (req.method === 'POST' && url.pathname === '/api/environment/prepare') {
